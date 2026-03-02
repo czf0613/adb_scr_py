@@ -4,3 +4,4 @@
 **/*.in linguist-vendored
 **/*.lock linguist-vendored
 **/*.md linguist-vendored
+native_code/**/CMakeLists.txt linguist-vendored
