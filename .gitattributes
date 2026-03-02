@@ -1,0 +1,6 @@
+# 有些文件不应该被计入langs排名，忽略它
+**/*.sh linguist-vendored
+**/*.toml linguist-vendored
+**/*.in linguist-vendored
+**/*.lock linguist-vendored
+**/*.md linguist-vendored

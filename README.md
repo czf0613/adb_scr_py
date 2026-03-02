@@ -22,13 +22,13 @@
 ### 安装方式
 
 ```bash
-pip install adb-scr-py
+pip install adb_scr_py
 ```
 
 或使用 uv：
 
 ```bash
-uv add adb-scr-py
+uv add adb_scr_py
 ```
 
 ## 快速开始
