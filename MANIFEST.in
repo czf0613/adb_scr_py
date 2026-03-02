@@ -1,0 +1,7 @@
+include src/adb_scr/res/scrcpy-server.bin
+
+recursive-include native_code/macOS/include *
+recursive-include native_code/macOS/src *
+recursive-include native_code/macOS/third_party *
+
+recursive-exclude tests/ *

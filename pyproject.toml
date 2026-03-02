@@ -1,0 +1,37 @@
+[project]
+name = "adb_scr_py"
+version = "0.0.2"
+description = "使用ADB协议在电脑上控制手机，并能高效获取屏幕显示的内容"
+readme = "README.md"
+keywords = ["adb", "screen mirror", "phone control"]
+authors = [{ name = "Kevin Chen", email = "1354016594@qq.com" }]
+license = "MIT"
+requires-python = ">=3.11"
+classifiers = [
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: C",
+]
+dependencies = ["aiofiles>=25.1.0"]
+
+[project.urls]
+Home-page = "https://github.com/czf0613/adb_scr_py"
+
+[build-system]
+requires = ["setuptools>=45.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages.find = { where = ["src"] }
+include-package-data = true
+package-data = { adb_scr = ["res/scrcpy-server.bin"] }
+
+[dependency-groups]
+dev = ["pytest>=7.0.1", "setuptools>=82.0.0"]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "[%(asctime)s] %(levelname)s %(message)s"
+log_cli_date_format = "%Y-%m-%dT%H:%M:%S%z"
