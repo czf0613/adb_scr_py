@@ -1,4 +1,5 @@
 # 严禁from .consts import XXX 来拿到这些常量，会拿到当时的值，而拿不到新的值
+__all__ = []
 
 SCRCPY_VERSION = "3.2"
 # scrcpy-server.bin释放出来的路径

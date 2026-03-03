@@ -5,6 +5,8 @@ from asyncio import subprocess
 import asyncio
 from .. import consts
 
+__all__ = []
+
 
 async def push_file(serial: str, local_path: str, remote_path: str) -> bool:
     """

@@ -10,6 +10,8 @@ from .._adb_scr_media import (
 import asyncio
 from adb_scr.logger import logger
 
+__all__ = []
+
 
 @final
 class VtbH264Decoder(H264DecoderBase):

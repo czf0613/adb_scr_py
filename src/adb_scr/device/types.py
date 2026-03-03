@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import Literal, final
 from enum import IntEnum
 
+__all__ = []
+
 # 设备的连接类型，目前只支持tcp和usb
 type ConnectionType = Literal["tcp", "usb"]
 

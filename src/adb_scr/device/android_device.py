@@ -18,6 +18,8 @@ from ..media_ext import bgra8_to_jpg
 from .types import ConnectionType, GestureAction, GestureActionNode
 import math
 
+__all__ = []
+
 
 @final
 class AndroidDevice:
@@ -165,7 +167,10 @@ class AndroidDevice:
             return None
 
         width, height, bgra_data = frame_data
-        jpg_data = bgra8_to_jpg(width, height, bgra_data, quality)
+        # 编码图片可能会有点久，为了防止卡解释器，这里用异步方式执行
+        jpg_data = await asyncio.to_thread(
+            bgra8_to_jpg, width, height, bgra_data, quality
+        )
         if jpg_data is None:
             logger.error("将BGRA数据转换为JPG格式失败")
             return None

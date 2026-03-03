@@ -1,6 +1,6 @@
 [project]
 name = "adb_scr_py"
-version = "0.0.3"
+version = "0.1.0"
 description = "使用ADB协议在电脑上控制手机，并能高效获取屏幕显示的内容"
 readme = "README.md"
 keywords = ["adb", "screen mirror", "phone control"]

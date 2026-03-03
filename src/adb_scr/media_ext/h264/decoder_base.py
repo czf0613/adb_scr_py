@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+__all__ = []
+
 
 class H264DecoderBase(ABC):
     """这个类没有保证线程安全，所以调用方要自己想点办法保证线程安全，防止并发修改state导致崩溃"""

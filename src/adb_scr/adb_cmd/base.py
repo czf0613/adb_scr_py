@@ -3,6 +3,8 @@ from asyncio import subprocess
 from ..logger import logger
 from .. import consts
 
+__all__ = []
+
 
 async def adb_version() -> str:
     """

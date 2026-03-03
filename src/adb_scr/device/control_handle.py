@@ -13,6 +13,8 @@ from ..media_ext import create_h264_decoder, H264DecoderBase
 from asyncio import Lock, IncompleteReadError
 from .types import GestureAction
 
+__all__ = []
+
 
 @final
 class DeviceControlHandle:

@@ -4,4 +4,7 @@
 **/*.in linguist-vendored
 **/*.lock linguist-vendored
 **/*.md linguist-vendored
+
+# 不是自己写的库
 native_code/**/CMakeLists.txt linguist-vendored
+native_code/macOS/third_party/** linguist-vendored
