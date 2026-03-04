@@ -1,5 +1,6 @@
 from asyncio import Lock
-from aiofiles.ospath import exists
+from aiofiles.ospath import exists, isfile
+from aiofiles.os import remove
 from .logger import logger
 from .exceptions import AdbScrPyInitException
 import os
@@ -72,8 +73,8 @@ async def init_lib(adb_path: str | None = None) -> tuple[str, str]:
 async def deinit_lib() -> None:
     """
     反初始化库。会停止守护进程等一系列清理工作。
-    这个函数有并发保护，调用方可以并发调用，但是只有第一次调用会生效。
-    不会抛出异常，永远认为执行正确。
+    由于控制手机的通信协议比较底层，如果在有设备连接的情况下调用这个函数可能产生非常严重的后果！
+    轻则python进程卡死，重则安卓手机死机。不要作死！！！
     """
     async with _mutex:
         global DAEMON_RUNNING
@@ -81,8 +82,8 @@ async def deinit_lib() -> None:
             return
 
         # 删掉临时文件
-        if os.path.isfile(consts.SCRCPY_SERVER_PATH):
-            os.remove(consts.SCRCPY_SERVER_PATH)
+        if await isfile(consts.SCRCPY_SERVER_PATH):
+            await remove(consts.SCRCPY_SERVER_PATH)
             logger.info(f"已删除临时文件：{consts.SCRCPY_SERVER_PATH}")
 
         await kill_adb_daemon()
