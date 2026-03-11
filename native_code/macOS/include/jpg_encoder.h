@@ -15,6 +15,7 @@
  * @param jpg 输出的JPEG图像数据指针（调用方提前分配好了足够的内存空间）
  * @return 编码是否成功
  */
-bool encode_bgra8_to_jpg(uint32_t width, uint32_t height, const uint8_t *bgra8, uint8_t quality, uint32_t *jpg_size, uint8_t *jpg);
+bool encode_bgra8_to_jpg(uint32_t width, uint32_t height, const uint8_t *bgra8,
+                         uint8_t quality, uint32_t *jpg_size, uint8_t *jpg);
 
 #endif

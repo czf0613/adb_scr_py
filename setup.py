@@ -1,27 +1,20 @@
 from setuptools import setup, Extension
 import sys
-import platform
 
+# 编译C模块
 c_modules = []
-
 match sys.platform:
     case "darwin":
-        # 必须得是arm64架构的
-        if platform.machine() != "arm64":
-            raise ValueError("Only arm64 architecture is supported on macOS")
-
-        # 编译C模块
-        include_dirs = [
-            "native_code/macOS/include",
-            "native_code/macOS/third_party/turbojpeg/include",
-        ]
         srcs = [
             "native_code/macOS/src/adb_scr_media.c",
             "native_code/macOS/src/jpg_encoder.c",
             "native_code/macOS/src/vtb_decoder.c",
             "native_code/macOS/src/vtb_helper.c",
         ]
-
+        include_dirs = [
+            "native_code/macOS/include",
+            "native_code/macOS/third_party/turbojpeg/include",
+        ]
         library_dirs = ["native_code/macOS/third_party/turbojpeg/lib"]
         libraries = ["turbojpeg"]
 

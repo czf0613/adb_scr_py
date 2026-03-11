@@ -37,7 +37,7 @@ static inline uint8_t get_nal_type(uint8_t header_byte) {
 }
 
 static inline void write_annexb(uint8_t *out_data, uint32_t payload_size) {
-  // macOS arm64肯定是小端序，所以可以写死
+  // macOS arm64和x64肯定是小端序，所以可以写死
   out_data[0] = (payload_size >> 24) & 0xFF;
   out_data[1] = (payload_size >> 16) & 0xFF;
   out_data[2] = (payload_size >> 8) & 0xFF;

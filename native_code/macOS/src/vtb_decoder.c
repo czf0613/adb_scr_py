@@ -50,19 +50,38 @@ int32_t vtb_create_decoder(const uint8_t *sps_and_pps, size_t sps_and_pps_size,
   *out_width = dim.width;
   *out_height = dim.height;
 
-  // 创建解码器
-  VTDecompressionSessionRef session = NULL;
-  CFStringRef keys[] = {
+  // 解码器参数
+  CFStringRef decoder_specification_keys[] = {
       kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
       kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder};
-  CFBooleanRef values[] = {kCFBooleanTrue, kCFBooleanTrue};
-
+  CFBooleanRef decoder_specification_values[] = {kCFBooleanTrue,
+                                                 kCFBooleanTrue};
   CFDictionaryRef decoder_specification = CFDictionaryCreate(
-      kCFAllocatorDefault, (const void **)keys, (const void **)values, 2,
+      kCFAllocatorDefault, (const void **)decoder_specification_keys,
+      (const void **)decoder_specification_values, 2,
       &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-  status = VTDecompressionSessionCreate(
-      kCFAllocatorDefault, format, decoder_specification, NULL, NULL, &session);
+
+  // 指定输出NV12
+  CFStringRef dest_attr_keys[] = {
+      kCVPixelBufferPixelFormatTypeKey,
+  };
+  int32_t nv12_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+  CFNumberRef dest_attr_values[] = {
+      CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &nv12_format),
+  };
+  CFDictionaryRef dest_attrs = CFDictionaryCreate(
+      kCFAllocatorDefault, (const void **)dest_attr_keys,
+      (const void **)dest_attr_values, 1, &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+
+  // 创建解码器
+  VTDecompressionSessionRef session = NULL;
+  status = VTDecompressionSessionCreate(kCFAllocatorDefault, format,
+                                        decoder_specification, dest_attrs, NULL,
+                                        &session);
   CFRelease(decoder_specification);
+  CFRelease(dest_attr_values[0]);
+  CFRelease(dest_attrs);
 
   if (status != noErr || session == NULL) {
     printf("create decoder session failed\n");
