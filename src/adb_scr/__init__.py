@@ -8,7 +8,7 @@ import tempfile
 from importlib.resources import files as resource_files
 from aiofiles import open as aio_open
 from .adb_cmd.base import adb_version, start_adb_daemon, kill_adb_daemon, adb_devices
-from . import consts
+from . import consts, exceptions
 from .device.android_device import AndroidDevice, GestureAction, GestureActionNode
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "AndroidDevice",
     "GestureAction",
     "GestureActionNode",
+    "exceptions",
 ]
 
 DAEMON_RUNNING = False

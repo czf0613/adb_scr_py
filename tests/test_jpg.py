@@ -12,10 +12,11 @@ def test_bgra8_to_jpg():
     # 计算 BGRA8 数据大小（每个像素 4 字节）
     data_size = width * height * 4
 
-    # 生成随机的 BGRA8 数据
-    bgra8_data = os.urandom(data_size)
+    for _ in range(10):
+        # 生成随机的 BGRA8 数据
+        bgra8_data = os.urandom(data_size)
 
-    # 调用 C extension 函数
-    jpg_data = bgra8_to_jpg(width, height, bgra8_data, quality)
-    assert jpg_data is not None, "生成 JPG 数据失败"
-    logger.info(f"成功生成 JPG 数据，大小: {len(jpg_data)} 字节")
+        # 调用 C extension 函数
+        jpg_data = bgra8_to_jpg(width, height, bgra8_data, quality)
+        assert jpg_data is not None, "生成 JPG 数据失败"
+        logger.info(f"成功生成 JPG 数据，大小: {len(jpg_data)} 字节")

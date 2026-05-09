@@ -1,6 +1,5 @@
 from setuptools import setup, Extension
 import sys
-import platform
 
 # 编译C模块
 c_modules = []
@@ -12,26 +11,19 @@ match sys.platform:
             "native_code/macOS/src/vtb_decoder.c",
             "native_code/macOS/src/vtb_helper.c",
         ]
-        include_dirs = [
-            "native_code/macOS/include",
-            "native_code/macOS/third_party/turbojpeg/include",
-        ]
-        library_dirs = [
-            f"native_code/macOS/third_party/turbojpeg/lib/{platform.machine()}"
-        ]
-        libraries = ["turbojpeg"]
-
         c_modules.append(
             Extension(
                 "adb_scr.media_ext._adb_scr_media",
                 sources=srcs,
-                include_dirs=include_dirs,
-                library_dirs=library_dirs,
-                libraries=libraries,
+                include_dirs=["native_code/macOS/include"],
                 extra_compile_args=["-O3"],
                 extra_link_args=[
                     "-framework",
                     "CoreFoundation",
+                    "-framework",
+                    "CoreGraphics",
+                    "-framework",
+                    "ImageIO",
                     "-framework",
                     "VideoToolbox",
                     "-framework",

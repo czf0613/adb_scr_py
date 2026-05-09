@@ -7,7 +7,6 @@ set(CMAKE_C_STANDARD 11)
 # 包含目录
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/turbojpeg/include
     "/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14"
 )
 
