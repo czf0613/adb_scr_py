@@ -15,5 +15,8 @@ native_code/*/.cache/
 .venv
 .python-version
 
+# Claude Code
+.claude/
+
 # fs rubbish
 .DS_Store

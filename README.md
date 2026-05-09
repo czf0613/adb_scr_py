@@ -244,7 +244,7 @@ await device.action_series(actions)
 ## 技术实现
 
 - 使用 [scrcpy](https://github.com/Genymobile/scrcpy) 服务端进行屏幕镜像
-- C extension 使用 [libjpeg-turbo](https://libjpeg-turbo.org/) 实现高效的图像编码
+- C extension 使用 macOS 原生 ImageIO/CoreGraphics 框架实现高效的图像编码
 - 完全异步实现，基于 Python asyncio
 
 ## 许可证
@@ -254,4 +254,5 @@ MIT License
 ## 致谢
 
 - [scrcpy](https://github.com/Genymobile/scrcpy) - 屏幕镜像核心
-- [libjpeg-turbo](https://libjpeg-turbo.org/) - 高性能 JPEG 编码
+- Apple ImageIO/CoreGraphics - 图像编码
+- Apple VideoToolbox - H.264 硬件解码
