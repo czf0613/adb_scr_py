@@ -50,7 +50,9 @@ async def run(iterations: int = 3600):
             logger.info(f"获取到的第{i+1}张截图，大小：{len(jpg_data)}")
 
             async with aio_open(
-                f'{os.path.join(os.path.dirname(__file__), '__pycache__',f"test_{i%10 + 1}.jpg")}',
+                os.path.join(
+                    os.path.dirname(__file__), "__pycache__", f"test_{i % 10 + 1}.jpg"
+                ),
                 "wb",
             ) as f:
                 await f.write(jpg_data)

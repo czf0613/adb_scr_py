@@ -3,5 +3,6 @@ include src/adb_scr/res/scrcpy-server.bin
 recursive-include native_code/macOS/include *
 recursive-include native_code/macOS/src *
 
-recursive-exclude tests/ *
-exclude CLAUDE.md
+prune tests
+prune docs
+exclude AGENTS.md

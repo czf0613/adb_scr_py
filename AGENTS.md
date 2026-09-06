@@ -1,4 +1,12 @@
-# CLAUDE.md
+# AGENTS.md
+
+## Start Here
+
+Read [docs/architecture.md](docs/architecture.md) for the current system design, module responsibilities, connection lifecycle, data flow, and concurrency boundaries before changing the implementation. Update that document when those contracts change.
+
+Read [docs/control-flow.md](docs/control-flow.md) for the reasons behind connection ordering, startup/shutdown waits, VideoToolbox configuration, GCD queue ownership, and the original high-frequency BGRA8/OpenCV use case. Preserve that raw-frame use case when changing the media pipeline; JPEG is an additional output path.
+
+See [docs/python-compatibility.md](docs/python-compatibility.md) for the Python compatibility audit and repeatable verification commands.
 
 ## Network Access
 
@@ -17,12 +25,20 @@ We use `uv` to manage this project. Always use `uv` commands for project operati
 - `uv add` to add dependencies
 - `uv sync` to sync the environment
 
+## Python Versions
+
+- The minimum supported runtime is **Python 3.10**, as declared in `pyproject.toml` and `uv.lock`.
+- Local development and default tests use **Python 3.14**. Keep the local `.python-version` at `3.14` (the file is currently gitignored).
+- New Python code, tests, and `.pyi` stubs must remain compatible with 3.10. Do not introduce newer-only syntax or standard-library APIs without a compatible fallback.
+- Validate compatibility with a real Python 3.10 interpreter in a separate temporary source tree/environment. Do not replace the normal 3.14 `.venv` just to perform this check.
+- A successful 3.14 run alone does not establish 3.10 compatibility. Check imports, native extension builds, and relevant device-free tests on both versions.
+
 ## Building
 
 Build the C extension in-place before running or testing:
 
 ```bash
-uv run setup.py build_ext --inplace
+uv run --python 3.14 --locked setup.py build_ext --inplace
 ```
 
 For a clean distribution build, use:
@@ -38,48 +54,16 @@ Tests are in the `tests/` directory. Some tests (`test_run.py`) require a real A
 Only run the specific test file(s) relevant to your changes, not the full suite. For example:
 
 ```bash
-uv run pytest tests/test_jpg.py -v -s
+uv run --python 3.14 --locked pytest tests/test_jpg.py -v -s
 ```
 
 Only run the full suite (`uv run pytest -v -s`) when explicitly asked or before a commit/push.
 
+For compatibility checks, compile or collect `tests/test_run.py` without executing it. Running it starts ADB and can control a connected phone; it needs an explicitly requested device test. `test.sh` runs the full suite, so it is not the default device-free check.
+
 ## Project Structure
 
-```
-native_code/
-  macOS/          # macOS C extension source
-    include/
-      jpg_encoder.h
-      vtb_decoder.h
-      vtb_helper.h
-    src/
-      adb_scr_media.c   # Module entry point (PyMethodDef, PyModuleDef)
-      jpg_encoder.c      # BGRA8 → JPEG encoding via ImageIO
-      vtb_decoder.c      # H.264 decoding via VideoToolbox
-      vtb_helper.c       # NALU parsing, NV12 → BGRA8 via Accelerate/vImage
-    CMakeLists.txt       # IDE hints only, NOT for building
-src/
-  adb_scr/
-    __init__.py          # Top-level public API (init_lib, list_devices, AndroidDevice)
-    consts.py            # Global mutable constants (paths, versions, FPS)
-    logger.py            # Logging setup
-    exceptions.py        # Exception hierarchy
-    adb_cmd/
-      base.py            # ADB daemon management, device enumeration
-      device_control.py  # File push, app launch/stop, scrcpy server start
-    device/
-      android_device.py  # AndroidDevice class (connect, screenshot, gestures)
-      control_handle.py  # Video/control socket management, H.264 stream processing
-      tcp_forward_tunnel.py  # ADB protocol tunneling to device UDS
-      bin_utils.py       # Binary encoding helpers, frame header parsing
-      types.py           # ConnectionType, GestureAction, GestureActionNode
-    media_ext/
-      __init__.py        # Platform-dispatched H.264 decoder factory
-      _adb_scr_media.pyi # Type stubs for the C extension
-      h264/
-        decoder_base.py  # Abstract H264DecoderBase
-        vtb_decoder.py   # macOS VideoToolbox decoder implementation
-```
+The detailed source map lives in [docs/architecture.md](docs/architecture.md). Python modules are under `src/adb_scr/`; macOS native code is under `native_code/macOS/`. The distribution is named `adb_scr_py`, while callers import `adb_scr`.
 
 The `CMakeLists.txt` file is **only** for IDE code navigation and hints (e.g. CLion, VS Code IntelliSense). Do **not** use CMake to build this project. Always build via `setup.py` (which is invoked automatically by `uv` / `pip`).
 
@@ -87,12 +71,14 @@ The `CMakeLists.txt` file is **only** for IDE code navigation and hints (e.g. CL
 
 Write docstrings and type annotations in the `.pyi` stub files, not in C code. Every public function exposed by the C extension must have a corresponding annotated entry in the `.pyi` file so that users and IDEs can understand the API.
 
+Architecture and development documents belong in `docs/`. Keep `docs/` and `AGENTS.md` out of both source distributions and wheels. `MANIFEST.in` excludes them; verify the actual archive contents after changing packaging rules. Keep the bundled `scrcpy-server.bin`, native sources/headers in the sdist, and extension/type information in the wheel.
+
 ## C Code Style
 
 - **No docstrings in C method tables.** Pass `NULL` for the `ml_doc` field in `PyMethodDef`. All documentation belongs in the `.pyi` stub files.
 - **Declare variables near first use.** Do not group declarations at the top of a function.
 - **Simplify allocation checks.** Functions like `PyList_New`, `Py_BuildValue`, and `PyDict_New` have negligible failure probability on modern machines. Do not write elaborate NULL-check-and-cleanup chains for them. Only check return values from system/OS calls that can realistically fail (e.g. `CMVideoFormatDescriptionCreateFromH264ParameterSets`, `VTDecompressionSessionCreate`).
-- **Do not check `PyArg_ParseTuple` return values.** The `.pyi` stub enforces correct types at the Python level, so callers will not pass wrong arguments. Just call it and use the parsed variables directly.
+- **Preserve the existing `PyArg_ParseTuple` convention in unrelated changes.** Current entry points assume valid arguments and do not check its return value. The `.pyi` stub documents this input contract for static tooling; it does not enforce types at runtime.
 - **Always use braces for control flow.** Every `if`, `else`, `for`, and `while` body must be wrapped in `{}`, even if it is a single statement.
 - **Use `(void)self;`** at the top of module-level functions to suppress unused parameter warnings.
 
