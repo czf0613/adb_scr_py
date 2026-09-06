@@ -6,7 +6,7 @@ readme = "README.md"
 keywords = ["adb", "screen mirror", "phone control"]
 authors = [{ name = "Kevin Chen", email = "1354016594@qq.com" }]
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
