@@ -1,21 +1,26 @@
-from asyncio import Lock
-from aiofiles.ospath import exists, isfile
-from aiofiles.os import remove
-from .logger import logger
-from .exceptions import AdbScrPyInitException
 import os
 import tempfile
+from asyncio import Lock
 from importlib.resources import files as resource_files
+
 from aiofiles import open as aio_open
-from .adb_cmd.base import adb_version, start_adb_daemon, kill_adb_daemon, adb_devices
+from aiofiles.os import makedirs, remove
+from aiofiles.ospath import exists, isfile
+
 from . import consts, exceptions
+from .adb_cmd.base import adb_devices, adb_version, kill_adb_daemon, start_adb_daemon
 from .device.android_device import AndroidDevice, GestureAction, GestureActionNode
+from .device.options import ConnectionOptions
+from .exceptions import AdbScrPyInitException
+from .logger import logger
 
 __all__ = [
     "init_lib",
     "deinit_lib",
     "list_devices",
+    "set_screen_record_fps",
     "AndroidDevice",
+    "ConnectionOptions",
     "GestureAction",
     "GestureActionNode",
     "exceptions",
@@ -26,13 +31,21 @@ _mutex = Lock()
 
 
 async def init_lib(adb_path: str | None = None) -> tuple[str, str]:
-    """
-    初始化库。会启动好守护进程等一系列准备工作，然后返回版本信息。
-    这个函数有并发保护，调用方可以并发调用，但是只有第一次调用会生效。
+    """初始化库并启动全局 ADB daemon。
 
-    :param adb_path: ADB可执行文件路径。如果为None，则会使用系统中查找。
-    :raises AdbScrPyInitException: 初始化失败。
-    :return: [ADB版本号, scrcpy版本号]
+    Args:
+        adb_path: ADB 可执行文件路径；None 使用 PATH 中的 adb。
+
+    Returns:
+        (ADB 版本, scrcpy 版本)。重复初始化返回已有版本信息。
+
+    Raises:
+        AdbScrPyInitException: 指定路径不存在或 daemon 启动返回非零状态。
+        OSError: 文件操作或子进程启动失败。
+        asyncio.TimeoutError: ADB 命令超时。
+
+    Notes:
+        同一事件循环内的初始化调用由锁串行化。
     """
     async with _mutex:
         global DAEMON_RUNNING
@@ -48,7 +61,7 @@ async def init_lib(adb_path: str | None = None) -> tuple[str, str]:
 
         # 释放scrcpy-server.bin到临时目录
         temp_dir = os.path.join(tempfile.gettempdir(), "adb_scr_py")
-        os.makedirs(temp_dir, exist_ok=True)
+        await makedirs(temp_dir, exist_ok=True)
         consts.SCRCPY_SERVER_PATH = os.path.join(temp_dir, "scrcpy-server.bin")
         res_file = (
             resource_files("adb_scr").joinpath("res/scrcpy-server.bin").read_bytes()
@@ -72,10 +85,15 @@ async def init_lib(adb_path: str | None = None) -> tuple[str, str]:
 
 
 async def deinit_lib() -> None:
-    """
-    反初始化库。会停止守护进程等一系列清理工作。
-    由于控制手机的通信协议比较底层，如果在有设备连接的情况下调用这个函数可能产生非常严重的后果！
-    轻则python进程卡死，重则安卓手机死机。不要作死！！！
+    """停止全局 ADB daemon 并删除释放到临时目录的服务端文件。
+
+    Raises:
+        OSError: 文件操作或子进程启动失败。
+        asyncio.TimeoutError: 停止 ADB daemon 超时。
+
+    Notes:
+        必须先 await 每台设备的 disconnect()。此函数不会代替调用方关闭
+        AndroidDevice；停止共享 daemon 也会影响其他 ADB 客户端。
     """
     async with _mutex:
         global DAEMON_RUNNING
@@ -93,9 +111,15 @@ async def deinit_lib() -> None:
 
 
 async def list_devices() -> list[str]:
-    """
-    获取当前连接的ADB设备列表。
-    :return: 设备列表，每个元素为设备地址/序列号。
+    """获取 ADB 返回的设备序列号列表。
+
+    Returns:
+        设备序列号或网络地址列表；未初始化或命令返回失败时为空列表。
+        结果可能包含 offline 或 unauthorized 设备，不能视为可连接性保证。
+
+    Raises:
+        OSError: 无法启动 ADB。
+        asyncio.TimeoutError: ADB 命令超时。
     """
     if not DAEMON_RUNNING:
         logger.warning("ADB守护进程未启动，无法获取设备列表")
@@ -105,13 +129,17 @@ async def list_devices() -> list[str]:
 
 
 def set_screen_record_fps(fps: int) -> None:
+    """设置后续新会话的录屏帧率上限。
+
+    Args:
+        fps: 10 到 60 的整数，默认配置为 30；不接受 bool 或小数。
+
+    Notes:
+        非法值会记录警告并保持原值。设置作用于整个进程，仅在下一次启动
+        scrcpy server 时读取；不会修改已运行的会话，也不保证实际帧率。
     """
-    设置录屏的帧率。目前默认是30，允许设置为[10, 60]之间的整数。
-    注意，这个函数只是设置了一个变量，实际生效需要等下一次connect的时候才会生效。
-    有硬件解码器的平台不需要管这个值，性能肯定够用，其它平台建议酌情处理。
-    """
-    if fps < 10 or fps > 60:
-        logger.warning(f"建议录屏帧率在[10, 60]之间，当前设置值不生效")
+    if type(fps) is not int or fps < 10 or fps > 60:
+        logger.warning("建议录屏帧率在[10, 60]之间，当前设置值不生效")
         return
 
     consts.SCREEN_FPS = fps

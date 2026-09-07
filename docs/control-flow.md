@@ -1,6 +1,6 @@
 # 控制流程、等待时序与 BGRA8 取帧设计
 
-本文解释当前 0.2.1 实现的执行顺序，以及等待、线程调度和像素格式选择的原因。模块总览见 [architecture.md](architecture.md)，开发约定见 [AGENTS.md](../AGENTS.md)。文中区分源码已实现的行为、作者说明的设计目标和仍需调用方保证的生命周期边界。
+本文解释当前实现的执行顺序，以及等待、线程调度和像素格式选择的原因。模块总览见 [architecture.md](architecture.md)，开发约定见 [AGENTS.md](../AGENTS.md)。文中区分源码已实现的行为、作者说明的设计目标和仍需调用方保证的生命周期边界。
 
 ## 原始目标：为 OpenCV 频繁提供 BGRA8 帧
 
@@ -45,7 +45,7 @@ flowchart LR
 
 每条 ADB 命令使用「4 位十六进制长度 + 命令字符串」封装。这里没有额外调用 `adb forward tcp:某端口 localabstract:...` 建立独立的本机监听端口；Python 是先连接 5037，再在连接内完成选设备和接 UDS 的请求。
 
-`connect_sockets()` 按相同流程打开两次连接，分别保存为视频流和控制流。两次目标 UDS 名称相同，流用途由 scrcpy 的接入顺序决定。当前代码对 UDS 名称调用的 `replace("video", "control")` 不会改变实际的 `localabstract:scrcpy_SCID` 字符串。
+`connect_sockets()` 按相同流程打开两次连接，分别保存为视频流和控制流。两次目标 UDS 名称相同，流用途由 scrcpy 的接入顺序决定。两条流均取得后才设置运行状态并启动接收任务，避免接收任务先退出、连接函数再将状态写回运行。
 
 ```mermaid
 sequenceDiagram
@@ -79,22 +79,21 @@ sequenceDiagram
 
 ## 为什么需要等待
 
-连接过程跨越本机 ADB 子进程、手机运行时、UDS、异步接收任务和硬件解码回调。这些阶段各自完成的时机不同。当前部分阶段采用固定延时留出执行时间，另一些阶段等待明确的操作完成。
+连接过程跨越本机 ADB 子进程、手机运行时、UDS、异步接收任务和硬件解码回调。这些阶段各自完成的时机不同。服务端启动仍保留固定缓冲，连接就绪和退出清理则等待明确完成信号。
 
 | 位置 | 当前等待 | 等待的作用与实际边界 |
 | --- | --- | --- |
 | `start_scrcpy_server()` | 固定 `asyncio.sleep(2)` | 源码标注为「等待上线」。从调用顺序看，是给手机进程启动、加载入口并建立 UDS 留缓冲；随后只检查 ADB shell 子进程是否退出，没有探测 UDS 或首帧 ready。2 秒是当前实现的缓冲值，不是 scrcpy 协议规定的时长。 |
-| `connect()` 返回后首次取尺寸/图像 | 库内不额外固定等待；README 示例等 0.5 秒 | 两条流已建立后，元数据、SPS/PPS、首个 IDR 和解码回调仍可能尚未完成。屏幕尺寸起初为 0，取帧可能返回 `None`。等待几百毫秒只是示例；调用方应以尺寸有效、取到帧为准，并给自己的等待设置截止时间。 |
-| `disconnect_sockets()` 第一处 | 设置 `running=False` 后等 0.5 秒 | 给接收任务让出事件循环，使其有机会观察退出状态。阻塞在 `readexactly()` 的任务不会仅因标志改变就立即退出，后续仍要关闭流并取消任务。 |
-| `disconnect_sockets()` 第二处 | 关闭流、`task.cancel()` 后再等 0.5 秒 | 给取消和连接收尾留缓冲，然后进入解码器清理。当前没有逐个等待取消后的任务或调用 `wait_closed()`；固定 sleep 不等于已经确认所有异步工作结束。 |
+| `connect()` 返回后首次取尺寸/图像 | 已等待有效元数据，但尚未保证首帧 | 取尺寸不再依赖固定 sleep；首帧由调用方在截止时间内检查。 |
+| `disconnect_sockets()` | 取消并等待接收任务、关闭流、关闭解码器 | 旧实现两处 0.5 秒缓冲已经替换为实际完成等待；固定时间不能证明资源已停止使用。 |
 | `get_current_frame_bgra8()` | `dispatch_sync`，没有固定秒数 | 等待解码器串行队列轮到取帧，并在队列内完成 NV12 → BGRA8。耗时取决于队列工作和像素转换。 |
-| `destroy_decoder()` | `VTDecompressionSessionWaitForAsynchronousFrames()`，没有固定秒数 | 等待 VideoToolbox 的异步/延迟帧处理完成，然后释放 session 等资源。[Apple API 说明](https://developer.apple.com/documentation/videotoolbox/vtdecompressionsessionwaitforasynchronousframes(_:))描述的是完成条件等待。 |
-| TCP 设备连接与本机 ADB TCP 建连 | 分别最多 10 秒、5 秒 | `asyncio.wait_for()` 的超时上限；成功可以立即返回。5 秒只包围 `open_connection()`，没有覆盖后续所有 ADB 应答或首帧等待。 |
+| `destroy_decoder()` | VideoToolbox 完成等待，再同步排空 GCD 队列 | 先确保没有新的回调提交，再确认已提交的帧替换结束并释放最终帧；没有强制销毁超时。[Apple API 说明](https://developer.apple.com/documentation/videotoolbox/vtdecompressionsessionwaitforasynchronousframes(_:))。 |
+| 设备连接与 I/O | `ConnectionOptions`：默认连接预算 30 秒，I/O 5 秒 | 覆盖隧道完整握手、元数据、半包和写入背压。静态画面间隔没有超时；主动 transport 探测负责补充 EOF/进程退出检测。 |
 | `tests/test_run.py` | 滑动前等 3 秒；截图循环每轮等 1 秒 | 属于真机演示/稳定性测试的启动缓冲和采样节奏，库并未要求每帧等 1 秒，也未要求每次操作前等 3 秒。 |
 
 手势中的毫秒级间隔还有不同用途：按下持续时间、双击间隔、滑动节点之间的节奏本身就是输入语义。`await writer.drain()` 只等待本机流的写入背压释放，也不保证手机 UI 已经处理完动作。
 
-当前用 `asyncio.sleep()` 等待会让出事件循环，可让其他设备的任务继续运行。以后若调整这些时间，应先明确被等待的阶段，建立对应的 ready/完成信号；不能仅凭一次快速设备上的成功就推断所有等待都可以删除。
+手势等待会让出事件循环，并同时等待会话停止信号；断连后提前结束等待，避免长按持有设备锁拖延资源回收。服务端的 2 秒启动缓冲仍保留，不能仅凭一次快速设备上的成功就删去。
 
 ## 硬件解码器如何建立
 
@@ -135,8 +134,8 @@ Python 不在打开 socket 时凭屏幕宽高创建解码器，而是在视频�
 ### 队列之外的生命周期仍要管理
 
 - Python 的 `DeviceControlHandle._mutex` 仍负责协调解码器替换、入队、读取和销毁；GCD 对最新帧的串行访问不能替代句柄生命周期保护。
-- 取帧和销毁通过 `asyncio.to_thread()` 调度，避免直接在事件循环线程等待 GCD/VideoToolbox；当前 C 扩展没有显式释放 GIL，不能据此推断 Python 计算完全不受影响。
-- 当前销毁路径等待 VideoToolbox，再释放 session、帧、队列和结构体，但没有显式等待回调另外提交的 GCD 替换任务全部执行完成。因此「正常读写在队列内互斥」不等于已证明销毁阶段没有竞态。固定的 0.5 秒缓冲也不能作为这一保证；后续修改清理逻辑时需要核对回调、队列和句柄的存活顺序。
+- 创建、取帧和销毁通过 `asyncio.to_thread()` 调度。原生句柄操作释放 GIL 并以容器互斥锁协调；JPEG 包装仍未单独释放 GIL。取消协程时必须等待在途线程及资源安装完成，不能假定线程已终止。
+- 当前销毁先等待 VideoToolbox 回调结束，再同步进入 GCD 队列释放最终帧，最后释放队列与结构体。旧实现漏等 GCD 任务，存在 use-after-free 风险；不得移除这一完成等待。Capsule 持有稳定容器，关闭清空容器指针，重复关闭和关闭后调用安全失败。
 
 ## NV12 快速转换为 BGRA8
 

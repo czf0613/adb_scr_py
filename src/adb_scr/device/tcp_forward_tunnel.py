@@ -1,70 +1,57 @@
+"""通过 ADB daemon 建立到手机 abstract Unix socket 的流。"""
+
 import asyncio
+
+from ..async_utils import close_writer, complete_on_cancel
 from ..logger import logger
 
 __all__ = []
 
 
 async def _push_cmd(writer: asyncio.StreamWriter, cmd: str) -> None:
-    text_fmt = f"{len(cmd):04x}{cmd}"
-    data = text_fmt.encode("utf-8")
-
-    writer.write(data)
+    payload = cmd.encode("utf-8")
+    writer.write(f"{len(payload):04x}".encode("ascii") + payload)
     await writer.drain()
 
 
 async def _receive_cmd_resp(reader: asyncio.StreamReader) -> None | str:
-    """
-    接收adb命令的响应。注意！返回None表示成功，否则返回错误信息。
-    """
-    try:
-        resp_status = await reader.readexactly(4)
-        if resp_status == b"OKAY":
-            # 正常返回响应
-            return None
-        elif resp_status == b"FAIL":
-            # 失败返回错误信息
-            resp_len_data = await reader.readexactly(4)
-            resp_len_hex = resp_len_data.decode("utf-8")
-            resp_len = int(resp_len_hex, base=16)
-            resp = await reader.readexactly(resp_len)
-            return resp.decode("utf-8")
-        else:
-            # 其他状态码，返回错误信息
-            return f"未知状态码：{resp_status.decode('utf-8')}"
-    except Exception as e:
-        logger.error(f"接收adb命令响应失败：{e}")
-        return f"接收adb命令响应失败：{e}"
+    """读取 ADB 状态；None 表示成功，否则返回错误说明。"""
+    status = await reader.readexactly(4)
+    if status == b"OKAY":
+        return None
+    if status == b"FAIL":
+        size = int(await reader.readexactly(4), 16)
+        return (await reader.readexactly(size)).decode("utf-8", errors="replace")
+    return f"未知 ADB 状态：{status!r}"
 
 
 async def setup_tunnel(
-    serial: str, uds: str
+    serial: str, uds: str, *, timeout: float = 5.0, close_timeout: float = 5.0
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-    """
-    通过模拟adb协议，把socket数据映射到手机的uds上面
-    """
+    """在总超时内建连、选择设备并连接 UDS；失败时回收已打开的流。"""
+    writer = None
+    transferred = False
+
+    async def handshake():
+        nonlocal writer
+        reader, writer = await asyncio.open_connection("localhost", 5037)
+        for command in (f"host:transport:{serial}", uds):
+            await _push_cmd(writer, command)
+            error = await _receive_cmd_resp(reader)
+            if error is not None:
+                raise ConnectionError(error)
+        return reader, writer
+
     try:
-        tcp_reader, tcp_writer = await asyncio.wait_for(
-            asyncio.open_connection("localhost", 5037), timeout=5
-        )
-
-        # 切换到指定设备
-        await _push_cmd(tcp_writer, f"host:transport:{serial}")
-        err = await _receive_cmd_resp(tcp_reader)
-        if err is not None:
-            logger.error(f"切换到设备{serial}失败：{err}")
-            tcp_writer.close()
-            return None
-
-        # 直接读取手机的uds
-        await _push_cmd(tcp_writer, uds)
-        err = await _receive_cmd_resp(tcp_reader)
-        if err is not None:
-            logger.error(f"读取手机uds{uds}失败：{err}")
-            tcp_writer.close()
-            return None
-
-        # 读写这个socket就相当于操作uds了
-        return tcp_reader, tcp_writer
-    except Exception as e:
-        logger.error(f"连接设备{serial}失败：{e}")
+        result = await asyncio.wait_for(handshake(), timeout)
+        transferred = True
+        return result
+    except Exception as error:
+        logger.warning(f"连接设备 {serial} 失败：{error!r}")
         return None
+    finally:
+        if writer is not None and not transferred:
+            try:
+                await complete_on_cancel(close_writer(writer, close_timeout))
+            except Exception as error:
+                logger.warning(f"关闭失败隧道：{error!r}")

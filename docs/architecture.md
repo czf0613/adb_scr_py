@@ -1,156 +1,119 @@
 # 当前系统架构
 
-本文描述 `adb_scr_py` 0.2.1 的现有实现，供后续 Agent 接手开发时定位代码和理解约束。模块职责、通信协议或资源生命周期发生变化时，应同步更新本文。开发命令见 [AGENTS.md](../AGENTS.md)，版本验证见 [Python 兼容性说明](python-compatibility.md)。
+本文描述当前工作树的模块职责、会话生命周期及并发边界。公共接口见 [api.md](api.md)，原始设计背景见 [control-flow.md](control-flow.md)，构建和版本验证见 [python-compatibility.md](python-compatibility.md)。契约改变时同步更新这些文档。
 
-连接顺序、等待时间的原因、GCD 帧管理与 BGRA8/OpenCV 的设计初衷，详见 [控制流程、等待时序与取帧设计](control-flow.md)。
+## 定位与边界
 
-## 定位与运行边界
+`adb_scr_py` 的 Python 导入名为 `adb_scr`，通过 ADB 和 scrcpy 3.2 控制 Android 并接收 H.264 视频。最低支持 Python 3.10，默认开发版本为 3.14。原生媒体实现仅支持 macOS，并要求 VideoToolbox 硬件解码。
 
-这是一个通过 ADB 和 scrcpy 服务端控制 Android 手机、持续接收屏幕视频并按需截图的 Python 库。发布包名是 `adb_scr_py`，导入名是 `adb_scr`。
+库缓存最新 NV12 解码帧，按需用 Accelerate/vImage 转成 BGRA8。原始 BGRA8 通路服务于高频 NumPy/OpenCV 图像处理；JPEG 是其上的附加输出。顶层 `AndroidDevice` 当前只提供 JPEG 便捷取图，内部控制句柄仍可返回原始 BGRA8 bytes。没有历史帧队列、视频录制或自动重连。
 
-原始设计目标包括频繁获取 BGRA8 像素供 OpenCV 矩阵处理。因此媒体层先提供原始帧，通过 Accelerate/vImage 的 CPU 向量加速将 NV12 转换为 BGRA8；JPEG 编码是其上的附加输出路径。当前原始帧入口位于控制句柄和解码器层，顶层 `AndroidDevice` 尚未提供独立的公开 BGRA8 取帧方法。
-
-- 最低运行版本为 Python 3.10；本地开发和默认测试使用 Python 3.14。
-- 当前构建与媒体实现仅支持 macOS，使用 CPython C 扩展和 Apple 系统框架；其他平台没有解码后端，`setup.py` 会拒绝构建。
-- 主机需要可用的 ADB 可执行文件。USB 使用设备序列号，TCP 使用已经具备网络调试条件的 `IP:端口`。
-- 包内包含 scrcpy 3.2 服务端，客户端按该版本的协议配置为 H.264 视频、启用控制、关闭音频。
-- 当前只缓存最新解码帧，不提供视频录制、历史帧队列或自动重连。
-
-## 分层与源码入口
+## 模块与数据流
 
 ```mermaid
 flowchart TD
-    Caller[调用方 / asyncio] --> API[adb_scr 公共 API]
-    API --> Device[AndroidDevice]
-    API --> Cmd[adb_cmd / ADB 子进程]
-    Device --> Cmd
+    API[adb_scr 公共 API] --> Device[AndroidDevice / 会话管理]
+    Device --> Cmd[adb_cmd / ADB 子进程]
     Device --> Handle[DeviceControlHandle]
-    Handle --> Tunnel[tcp_forward_tunnel / ADB 协议]
-    Tunnel --> Daemon[本机 ADB daemon :5037]
-    Cmd --> Daemon
-    Daemon --> Server[Android / scrcpy-server]
-    Server -->|H.264 视频| Handle
-    Handle -->|控制消息| Server
-    Handle --> Decoder[H264DecoderBase / VtbH264Decoder]
-    Decoder --> Native[C 扩展 / VideoToolbox / GCD]
-    Native -->|最新 NV12 帧转 BGRA8| Frame[控制句柄 / 原始帧 bytes]
-    Frame --> CV[调用方 / NumPy / OpenCV]
-    Frame --> Device
-    Device --> JPEG[C 扩展 / ImageIO JPEG 编码]
-    JPEG -->|bytes| Caller
+    Handle --> Tunnel[tcp_forward_tunnel]
+    Tunnel --> ADB[localhost:5037 / ADB daemon]
+    Cmd --> ADB
+    ADB --> Phone[Android / scrcpy-server]
+    Phone -->|H.264| Handle
+    Handle -->|控制消息| Phone
+    Handle --> Decoder[VtbH264Decoder]
+    Decoder --> Native[Capsule 容器 / VideoToolbox / GCD]
+    Native --> BGRA[BGRA8 bytes]
+    BGRA --> CV[NumPy / OpenCV]
+    BGRA --> JPEG[ImageIO JPEG]
 ```
 
-图中的视频与控制消息均通过 ADB 隧道传输，Python 不直接连接手机上的独立 TCP 服务端口。
-
-| 文件或目录 | 职责与边界 |
+| 文件 | 职责 |
 | --- | --- |
-| [`src/adb_scr/__init__.py`](../src/adb_scr/__init__.py) | 库初始化/清理、设备枚举、公共 API 导出、下一次连接使用的帧率设置 |
-| [`consts.py`](../src/adb_scr/consts.py) | 进程级可变配置：ADB 路径/版本、scrcpy 版本/路径、帧率 |
-| [`logger.py`](../src/adb_scr/logger.py)、[`exceptions.py`](../src/adb_scr/exceptions.py) | 日志配置；初始化与解码器异常层次 |
-| [`adb_cmd/base.py`](../src/adb_scr/adb_cmd/base.py) | 异步 ADB 子进程、daemon 启停、设备枚举、TCP 连接/断开、通用设备命令 |
-| [`adb_cmd/device_control.py`](../src/adb_scr/adb_cmd/device_control.py) | 推送文件、启动/停止 App、启动 scrcpy 服务端 |
-| [`device/android_device.py`](../src/adb_scr/device/android_device.py) | 每台设备的会话入口；编排连接、清理、截图与手势 API |
-| [`device/control_handle.py`](../src/adb_scr/device/control_handle.py) | 两条 socket、两个接收任务、视频包解析、解码器切换与控制消息发送 |
-| [`device/tcp_forward_tunnel.py`](../src/adb_scr/device/tcp_forward_tunnel.py) | 直接与本机 ADB daemon 握手，将流连接到手机上的 Unix domain socket |
-| [`device/bin_utils.py`](../src/adb_scr/device/bin_utils.py)、[`device/types.py`](../src/adb_scr/device/types.py) | 大端序整数、视频帧标志、随机延时；连接类型、手势枚举和节点数据类 |
-| [`media_ext/__init__.py`](../src/adb_scr/media_ext/__init__.py) | 导入 JPEG 编码函数，按平台创建 H.264 解码器 |
-| [`media_ext/h264/decoder_base.py`](../src/adb_scr/media_ext/h264/decoder_base.py) | 解码器接口：同步入队、异步取帧、异步关闭 |
-| [`media_ext/h264/vtb_decoder.py`](../src/adb_scr/media_ext/h264/vtb_decoder.py) | VideoToolbox 句柄封装、有效状态、首个 IDR 帧约束、线程调度 |
-| [`media_ext/_adb_scr_media.pyi`](../src/adb_scr/media_ext/_adb_scr_media.pyi) | C 扩展的 Python 类型与 API 文档；`py.typed` 声明类型信息随包提供 |
-| [`native_code/macOS/src/adb_scr_media.c`](../native_code/macOS/src/adb_scr_media.c) | Python/C 参数与返回值转换，使用 `PyCapsule` 暴露不透明解码器句柄 |
-| [`vtb_decoder.c`](../native_code/macOS/src/vtb_decoder.c) | 硬件解码 session、异步回调、GCD 串行队列、最新帧与显式资源释放 |
-| [`vtb_helper.c`](../native_code/macOS/src/vtb_helper.c) | SPS/PPS 拆分、Annex B NALU 转长度前缀格式、部分 SEI+IDR 组合处理、vImage NV12 → BGRA8 |
-| [`jpg_encoder.c`](../native_code/macOS/src/jpg_encoder.c) | CoreGraphics/ImageIO 将 BGRA8 编码成 JPEG |
+| `src/adb_scr/__init__.py` | 初始化/反初始化、设备枚举、FPS 配置及公开导出 |
+| `consts.py` | 进程级可变配置；始终通过 `consts.XXX` 读取 |
+| `async_utils.py` | 在取消时等待已取得所有权的操作完成；关闭流、终止并回收子进程 |
+| `adb_cmd/base.py` | 有超时和取消清理的 ADB 子进程执行；设备枚举、transport 连接等 |
+| `adb_cmd/device_control.py` | 推送、应用命令、启动并转交 scrcpy 进程所有权 |
+| `device/options.py` | 不可变、经验证的公开 `ConnectionOptions` |
+| `device/android_device.py` | 连接、回滚、会话监控、断连通知、显式重连、截图和手势 |
+| `device/control_handle.py` | 两条流、接收任务、视频协议、解码器替换、控制发送、幂等关闭 |
+| `device/tcp_forward_tunnel.py` | 一次有总超时的 TCP + ADB 握手；失败回收流 |
+| `device/types.py` / `bin_utils.py` | 连接/手势类型、整数编码、帧头及随机延时 |
+| `media_ext/h264/` | 同步快速入队、异步取帧/关闭及首个 IDR 约束 |
+| `media_ext/_adb_scr_media.pyi` | 原生公共函数的类型与 docstring；方法表不放 C docstring |
+| `native_code/macOS/src/adb_scr_media.c` | Python/C 转换；稳定 Capsule 容器、句柄锁、析构兜底 |
+| `vtb_decoder.c` | VideoToolbox session、回调、最新帧串行队列及有序销毁 |
+| `vtb_helper.c` | Annex B 处理及 NV12 → BGRA8 转换 |
+| `jpg_encoder.c` | ImageIO/CoreGraphics JPEG 编码 |
 
-## 连接与清理流程
+## 初始化与连接所有权
 
-### 1. 进程级初始化
+`init_lib()` 在模块锁内释放包内服务端资源、获取 ADB 版本并启动共享 daemon。必须先逐台 `disconnect()`，再 `deinit_lib()`；反初始化不枚举设备对象，停止 daemon 会影响其他 ADB 客户端。
 
-`init_lib()` 受模块级 `asyncio.Lock` 保护，并通过 `DAEMON_RUNNING` 避免重复初始化。它依次验证可选的 ADB 路径、将包内 `res/scrcpy-server.bin` 写到系统临时目录的 `adb_scr_py/` 下、获取 ADB 版本并执行 `adb start-server`。
+每次 `AndroidDevice.connect()` 在设备锁内清理失效会话，再建立新的断连通知对象。一次连接受 `connect_timeout` 预算约束：
 
-`list_devices()` 仅在库初始化后调用 `adb devices`。`consts` 中的值会被初始化过程和帧率设置修改，其他模块必须通过 `consts.XXX` 读取最新值，不能按值导入。
+1. TCP 设备执行 `adb connect`；USB 设备略过。
+2. 推送服务端到 `/data/local/tmp/scrcpy-server.jar`。
+3. 启动 scrcpy 3.2，配置 H.264、视频/控制开启、音频关闭，保留原有 2 秒启动缓冲。
+4. 保存进程和控制句柄的所有权；按视频、控制顺序连接同一个 `localabstract:scrcpy_SCID`。
+5. 两条流均取得后设置 `running=True` 并启动接收任务，等待视频元数据有效。
+6. 确认进程和流仍有效，启动会话监控，再返回 True。
 
-### 2. 每台设备的会话
+`connect()` 成功只保证流和有效尺寸就绪，首个解码帧可能稍后到达。普通失败或超时完整回滚后返回 False；取消完成回滚后传播 `CancelledError`。同一实例允许显式再次连接，不自动重连。
 
-`AndroidDevice` 为实例生成一个 8 位十六进制 `scid`。`connect()` 在设备锁内依次执行：
+单条隧道的超时覆盖 `open_connection()`、`host:transport:SERIAL` 和 UDS 应答。这里直接使用 ADB daemon 协议，没有执行 `adb forward` 创建额外监听端口。命令长度按 UTF-8 字节数编码。
 
-1. TCP 设备先执行 `adb connect`；USB 设备省略该步骤。
-2. 将服务端推送到手机 `/data/local/tmp/scrcpy-server.jar`。
-3. 通过 `adb -s SERIAL shell ... app_process` 启动 scrcpy 3.2，保存对应子进程对象；当前启动检查固定等待 2 秒。
-4. 创建 `DeviceControlHandle`，先打开视频连接，再打开控制连接，并启动接收任务。
+FPS 是下一次启动服务端使用的进程级上限，不影响已运行会话；模块导入先后不影响 `consts.SCREEN_FPS` 的动态读取。
 
-`set_screen_record_fps()` 只改变下一次启动服务端使用的 `max_fps`，不会调整已经运行的会话。
+## 接收协议与故障检测
 
-### 3. ADB 隧道
+视频元数据为 1 字节确认、64 字节设备名、编码器 ID/宽/高各 4 字节，共 77 字节。必须确认 H.264 且尺寸为正。每个视频包由 8 字节标志/微秒 PTS、4 字节 payload 长度和 H.264 payload 组成。
 
-`setup_tunnel()` 打开 `localhost:5037`，用 ADB 的「4 位十六进制长度 + 命令字符串」格式发送 `host:transport:SERIAL`，再发送 `localabstract:scrcpy_SCID`。每一步都读取 `OKAY` 或 `FAIL` 响应。
+包间允许无限静默；首字节到达后，剩余头和 payload 必须在一次 `io_timeout` 内收齐。当前单包大小限制为 1–64 MiB。半包超时后整会话关闭，不尝试从错位字节继续解析。
 
-这里没有执行 `adb forward` 创建本地监听端口。视频与控制各占一个 TCP 流，先后连接到同一个设备端 UDS，由 scrcpy 按连接顺序区分用途。代码中的 `uds_name.replace("video", "control")` 对实际的 `localabstract:scrcpy_SCID` 名称不产生变化。
+控制上行使用 `read(4096)` 分块消费，空 bytes 明确表示 EOF。正常静默没有超时，也不积攒到整个连接关闭才消费。控制下行 `write()` 后用有超时的 `drain()` 等待背压，发送失败触发会话停止；不提供手机 UI 执行确认。
 
-### 4. 显式释放
+监控同时等待控制句柄结束、scrcpy 子进程退出和可选的存活探测结果。探测默认每次完成后等待 5 秒，再执行有 5 秒超时的 `adb -s SERIAL shell true`，连续 3 次失败关闭；成功归零。它验证 transport/shell，不证明视频编码器仍在产帧。`probe_interval=None` 禁用主动探测。
 
-调用方必须先逐台 `await device.disconnect()`，再执行 `await deinit_lib()`。设备清理会终止保存的 scrcpy 子进程、关闭两条流、取消接收任务、关闭解码器，并为 TCP 设备执行 `adb disconnect`。
+## 关闭与取消
 
-`deinit_lib()` 删除释放出的服务端临时文件，并执行全局 `adb kill-server`。它不会代替调用方枚举和关闭 `AndroidDevice`；在设备仍连接时调用会破坏底层通信和清理顺序。
+控制句柄只创建一个清理任务，首次原因获保留。停止信号立即令 `running=False` 并唤醒手势等待。清理取消并等待接收任务、关闭两条流，在解码器锁内关闭解码器并清零尺寸。关闭流等待超时后 abort transport。
 
-## 视频和截图数据流
+设备监控在发出停止信号后取消并等待其他监控任务（含在途探测命令），再在设备锁内回收控制句柄、scrcpy 进程及本会话使用的 TCP transport。手势等待在停止信号到达时提前结束，不再用长按时长拖延断连清理。已进行的普通 ADB 应用命令仍有自身超时，可能延后锁的取得。
 
-本节概述当前实现；原始帧内存布局、转换成本和 OpenCV 使用方式见 [取帧设计](control-flow.md#bgra8-到-opencv-的消费方式)。
+子进程终止处理允许进程已退出，kill 后排空捕获的 PIPE 并等待回收，避免暂停的输出流阻止 transport 关闭。失败清理尽可能完成所有资源回收，并记录各项异常。
 
-视频连接先读取 1 字节确认包、64 字节设备名以及编码器 ID、宽度、高度（各 4 字节大端整数）。随后每个包为：
+`wait_disconnected()` 等待调用开始时的会话通知，返回原因；旧等待者不会被重连覆盖。取消这个等待本身不关闭会话。主动 `disconnect()` 幂等，取消时会等待已经开始的清理完成。
 
-| 字段 | 大小 | 当前解释 |
-| --- | --- | --- |
-| 帧标志与时间戳 | 8 字节 | bit 63 是配置标志，bit 62 是关键帧标志，低 62 位是微秒 PTS |
-| payload 长度 | 4 字节 | 大端无符号整数 |
-| payload | 由长度决定 | Annex B 格式的 H.264 数据 |
+`complete_on_cancel()` 保存异步任务的强引用，用 shield 防止调用方取消被传播到已经拥有资源的工作；收到取消后仍等待工作结束再传播取消。它用于原生工作、解码器安装、子进程创建/回收和清理。取消不等于工作线程停止；创建解码器的结果安装也属于保护范围，避免结果因取消而丢失。
 
-配置包携带 SPS/PPS。收到配置包后，控制句柄在锁内关闭旧解码器，再创建新解码器，并用解码器解析出的尺寸更新屏幕宽高。普通视频包在同一把锁下入队；`VtbH264Decoder` 在首次接受 IDR 前会跳过非关键帧。
+网络超时启动取消和清理，实际返回可能晚于配置值。原生 VideoToolbox/GCD 销毁无强制超时；宁可等待在途工作完成，也不释放仍被引用的内存。
 
-C 层将 NALU 转成 VideoToolbox 所需格式后异步提交硬件解码。输出回调保留 `CVPixelBuffer` 引用，并通过每个解码器的 GCD 串行队列替换 `current_frame`，释放旧帧。
+## 原生帧与句柄生命周期
 
-截图按需经过以下步骤：
+Capsule 指向稳定的容器，容器持有 `decoder` 指针和原生互斥锁。读取、入队和销毁先取得该锁；销毁清空容器内指针。重复销毁无操作，关闭后取帧返回 None、入队返回 False。Capsule 析构作为资源兜底，显式关闭仍是调用约定。
 
-1. `AndroidDevice.get_screenshot_jpg()` 向控制句柄请求当前帧。
-2. 控制句柄持有解码器锁，经 `asyncio.to_thread()` 调用 C 层取帧。
-3. C 层通过 GCD 同步读取最新 NV12 帧，利用 Accelerate/vImage 转成 BGRA8，再复制成 Python `bytes`。
-4. Python 通过工作线程调用 ImageIO JPEG 编码，返回 JPEG `bytes`。
+VideoToolbox 输出回调 retain 图像后，将替换工作提交到解码器的 GCD 串行队列。最新帧替换与 BGRA8 转换均在该队列内执行。转换检查像素锁定返回值，用只读锁配对解锁；Python 最终得到独立 bytes。
 
-因此截图不是一条独立录屏通道，也不是零拷贝接口；等待解码器锁、像素转换和 JPEG 编码都会带来开销。高频截图还会竞争视频入队所用的锁。刚连接或刚切换解码器时，尺寸可能尚未就绪，截图可能返回 `None`。
+销毁顺序为：阻止同一句柄新操作 → 等待 VideoToolbox 异步回调 → invalidate/release session → 同步进入 GCD 队列，确认旧任务结束并释放最终帧 → 释放队列与 decoder → 清空容器指针。等待 VideoToolbox 不等于等待回调另行提交的 GCD block，必须保留后者的同步步骤。
 
-## 控制消息与并发边界
+创建、取帧、销毁从异步调用路径进入 `to_thread()`。原生句柄操作等待/执行期间释放 GIL，并由容器互斥锁保护；快速入队在正常控制句柄路径不与取帧/关闭竞争。JPEG 编码仍经工作线程调用，但其 C 包装没有专门释放 GIL，不能把工作线程调度描述为所有 Python 线程都不受影响。扩展未声明 free-threaded 支持。
 
-触摸消息（`0x02`）包含动作、固定 pointer ID、坐标、屏幕尺寸、压力等字段。返回键使用 `0x04`，粘贴文本使用 `0x09` 和 UTF-8 字节长度。`AndroidDevice` 负责将点击、长按、滑动、手势序列转换成消息；`DeviceControlHandle.send_event()` 写入控制流并 `drain()`。控制上行任务当前只消费并丢弃数据，没有实现剪贴板响应或独立的确认机制。
+## 并发边界
 
-| 同步机制 | 保护范围 |
+| 机制 | 保护内容 |
 | --- | --- |
-| 模块级 `_mutex` | `init_lib()` / `deinit_lib()` 与 daemon 状态 |
-| `AndroidDevice._mutex` | 连接/断开、App 命令、单段手势序列和控制写入 |
-| `DeviceControlHandle._mutex` | 解码器替换、入队、取帧和关闭 |
-| C 层 GCD 串行队列 | 最新解码帧的替换和读取 |
+| 模块级 asyncio 锁 | 库初始化/反初始化 |
+| 设备 asyncio 锁 | 会话建立/回收、应用命令、指定手势序列 |
+| 控制句柄 asyncio 锁 | 解码器创建/替换、取帧、入队、关闭 |
+| Capsule 容器原生锁 | 同一原生 decoder 的操作与销毁 |
+| 每解码器 GCD 串行队列 | 当前 CVPixelBuffer 的替换、转换及最终释放 |
 
-这些 `asyncio.Lock` 面向同一事件循环内的任务，不构成跨线程或跨事件循环调用的保证。多个设备拥有各自的控制句柄、锁、接收任务和解码 session；ADB daemon 与模块配置仍在进程内共享。
+asyncio 锁不提供跨事件循环保证。多设备拥有独立会话、队列和解码器；ADB daemon 和模块配置仍在进程内共享。
 
-当前创建解码器与视频入队是同步调用；取帧、销毁解码器和 JPEG 编码通过 `asyncio.to_thread()` 调度。取帧在 C 层包含 `dispatch_sync`，销毁会等待异步解码。后续修改时要区分「快速入队」和「等待完成」的接口。
+## 构建与验证
 
-C 扩展当前没有显式的 GIL 释放区段，也没有声明 free-threaded Python 支持；工作线程调度和硬件异步解码不等于整个库不受 GIL 影响。
+原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
 
-## 状态和错误处理的现状
-
-- ADB/连接操作多用 `bool`、`None` 或退出码表示失败；库初始化失败抛出 `AdbScrPyInitException`。
-- 解码器构造失败抛出 `AdbScrPyH264DecoderException`，工厂将它转换为 `None` 并记录日志。
-- 接收任务遇到流结束或异常会退出并将 `running` 设为 `False`，没有自动恢复连接。
-- 连接状态分别保存在子进程引用、控制句柄和 `running` 中，并非统一状态机。`connect()` 的部分失败分支没有完整回滚；后续修改连接逻辑时需要同时检查失败后的资源所有权。
-- C 句柄依赖显式关闭，`PyCapsule` 没有析构回调。原生入口假定参数满足约定，`.pyi` 只提供静态类型信息，不负责运行时校验。
-
-以上是现有实现的边界，不能将其理解为已经验证的自动恢复或异常安全保证。
-
-## 构建、发布与测试
-
-[`pyproject.toml`](../pyproject.toml) 声明项目元数据、`aiofiles` 运行依赖、开发依赖和 setuptools 后端；[`setup.py`](../setup.py) 将四个 C 源文件编译为 `adb_scr.media_ext._adb_scr_media`，链接 Apple 系统框架。`native_code/macOS/CMakeLists.txt` 仅供 IDE 索引，不能用于正式构建。
-
-扩展使用当前 CPython 的 ABI，wheel 需要匹配 Python 小版本和平台，不能将 3.14 的 wheel 当作 3.10 的 wheel。源码安装由目标 Python 编译扩展。
-
-[`MANIFEST.in`](../MANIFEST.in) 保留 scrcpy 二进制及 C 源码/头文件，排除 `tests/`、`docs/` 和 `AGENTS.md`。wheel 从 `src/` 发现包，包含扩展、服务端资源、`.pyi` 和 `py.typed`。发布前需实际检查 sdist/wheel 的文件清单，不能仅凭目录位置判断。
-
-[`tests/test_jpg.py`](../tests/test_jpg.py) 使用随机 BGRA8 数据测试真实 JPEG 编码，不需要手机。[`tests/test_run.py`](../tests/test_run.py) 是交互式真机测试，会启动 ADB、控制首台设备并保存截图；不能作为默认兼容性测试执行。默认验证流程和本次检查范围见 [Python 兼容性说明](python-compatibility.md)。
+无设备测试覆盖 EOF/半包/握手超时、部分连接失败、取消、进程退出、显式重连、探测阈值、手势中断、管道排空、原生重复关闭、GCD 排队工作完成及合成 H.264 → BGRA8 → JPEG。真机 `tests/test_run.py` 仅在明确请求时执行，默认兼容性核查只编译或收集它。

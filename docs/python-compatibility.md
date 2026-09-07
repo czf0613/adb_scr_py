@@ -6,6 +6,41 @@
 
 Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖或使用较新语法/标准库 API 时，要在真实 3.10 解释器下验证；仅在 3.14 上通过测试不能证明最低版本可用。
 
+## 2026-09-07 生命周期与 API 整理验证
+
+本次验证平台为 macOS arm64。Python 3.14.6 在正常工作区构建原生扩展；
+Python 3.10.20 在独立临时源树中构建 sdist/wheel，再安装 wheel 测试。
+正常 `.venv` 和 `.python-version` 继续使用 3.14。
+
+| 验证 | 3.10.20 | 3.14.6 |
+| --- | --- | --- |
+| 源码、测试、setup.py、原生 .pyi 编译（23 个文件） | 通过 | 通过 |
+| 全部 16 个 Python 模块导入 | 通过，路径为临时 site-packages | 通过 |
+| 原生扩展构建及真实 VideoToolbox 调用 | 通过 | 通过 |
+| 四个相关无设备测试文件 | 21 passed | 21 passed |
+| test_run.py 仅收集 | 1 collected，未执行 | 1 collected，未执行 |
+
+新增回归测试先确认旧行为失败，再修复关键路径：FPS 小数校验、控制流 EOF
+空转、原生重复销毁、取帧取消、失败/取消连接回滚、探测回收顺序、满输出管道、
+长按断连及连接期间的并发 disconnect。原生测试使用合成 64×64 H.264，另含
+确定性的 GCD 排队完成测试和并发读取/入队/重复关闭压力测试。
+
+3.10 sdist/wheel 的实际文件清单已核对：不含 docs/、tests/ 和 AGENTS.md，
+sdist 保留原生源码/头文件及 scrcpy-server.bin，wheel 保留扩展、资源、.pyi、py.typed。
+README/API 示例语法及限定范围的 Ruff 静态检查通过。没有连接手机或运行 ADB
+设备命令；测试中的 transport 和进程均为本地模拟或合成子进程。
+
+当前改动相关的无设备验证命令：
+
+```bash
+uv run --python 3.14 --locked setup.py build_ext --inplace
+uv run --python 3.14 --locked pytest tests/test_device_session.py tests/test_lifecycle.py tests/test_native_lifecycle.py tests/test_jpg.py -q
+uv run --python 3.14 --locked pytest tests/test_run.py --collect-only -q
+```
+
+原生合成测试需要本机 ffmpeg/libx264 和 macOS 编译工具链；没有 ffmpeg 时会跳过
+相关用例。本次两个版本均实际执行了原生测试，没有以跳过代替验证。
+
 ## 2026-09-06 核查结果
 
 | 检查对象 | 结果与处理 |

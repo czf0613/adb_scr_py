@@ -1,5 +1,5 @@
-import random
 import asyncio
+import random
 from typing import TYPE_CHECKING, final
 
 __all__ = []
@@ -29,10 +29,11 @@ def from_u16_be(data: bytes) -> int:
 
 
 async def random_sleep_ms(min_ms: int, max_ms: int) -> None:
-    """
-    随机等待一段时间（随机范围内）
-    :param min_ms: 最小等待时间（毫秒）
-    :param max_ms: 最大等待时间（毫秒）
+    """随机等待一段时间（随机范围内）
+
+    Args:
+        min_ms: 最小等待时间（毫秒）
+        max_ms: 最大等待时间（毫秒）
     """
     assert min_ms >= 0 and max_ms >= 0 and min_ms <= max_ms, "时间范围异常"
     rand_ms = random.randint(min_ms, max_ms)
@@ -40,8 +41,10 @@ async def random_sleep_ms(min_ms: int, max_ms: int) -> None:
 
 
 def decode_lossy_utf8(data: bytes) -> str:
-    """这个字节数组后面可能被填零，所以它不是合法的UTF-8字符串，不能直接解码。
-    这个函数会先切掉所有的\0字节，然后返回一个合法的字符串。
+    """移除尾部 NUL 填充，再严格解码 UTF-8。
+
+    Raises:
+        UnicodeDecodeError: 有效内容含非法 UTF-8 字节。
     """
     return data.rstrip(b"\0").decode("utf-8")
 

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from typing import Literal, TypeAlias, final
 from enum import IntEnum
+from typing import Literal, TypeAlias, final
 
 __all__ = []
 

@@ -115,9 +115,13 @@ void vtb_destroy_decoder(void **decoder) {
   CFRelease(vtb_decoder->session);
   CFRelease(vtb_decoder->format);
 
-  if (vtb_decoder->current_frame != NULL) {
-    CVPixelBufferRelease(vtb_decoder->current_frame);
-  }
+  // VideoToolbox callbacks have returned, but their queued blocks may remain.
+  dispatch_sync(vtb_decoder->queue, ^{
+    if (vtb_decoder->current_frame != NULL) {
+      CVPixelBufferRelease(vtb_decoder->current_frame);
+      vtb_decoder->current_frame = NULL;
+    }
+  });
 
   dispatch_release(vtb_decoder->queue);
   free(vtb_decoder);

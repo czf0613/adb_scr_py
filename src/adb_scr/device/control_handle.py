@@ -1,16 +1,19 @@
 import asyncio
+from asyncio import IncompleteReadError, Lock
 from typing import TYPE_CHECKING, final
+
+from ..async_utils import close_writer, complete_on_cancel
 from ..logger import logger
+from ..media_ext import H264DecoderBase, create_h264_decoder
 from .bin_utils import (
-    to_u16_be,
-    to_u32_be,
+    decode_frame_header,
     decode_lossy_utf8,
     from_u32_be,
-    decode_frame_header,
+    to_u16_be,
+    to_u32_be,
 )
+from .options import ConnectionOptions
 from .tcp_forward_tunnel import setup_tunnel
-from ..media_ext import create_h264_decoder, H264DecoderBase
-from asyncio import Lock, IncompleteReadError
 from .types import GestureAction
 
 __all__ = []
@@ -38,7 +41,15 @@ class DeviceControlHandle:
         h264_decoder: H264DecoderBase | None
         _mutex: Lock
 
-    def __init__(self, serial: str, scid: str) -> None:
+    def __init__(
+        self, serial: str, scid: str, *, options: ConnectionOptions | None = None
+    ) -> None:
+        self.options = options or ConnectionOptions()
+        self.disconnect_reason: str | None = None
+        self._ready = asyncio.Event()
+        self._closed = asyncio.Event()
+        self._stopped = asyncio.Event()
+        self._close_task: asyncio.Task | None = None
         self.serial = serial
         self.uds_name = f"localabstract:scrcpy_{scid}"
         self.screen_width = 0
@@ -55,153 +66,178 @@ class DeviceControlHandle:
         self._mutex = Lock()
 
     async def connect_sockets(self) -> bool:
-        """
-        连接设备的控制socket
-        :return: 如果连接成功，则返回True；否则返回False
-        """
+        """按视频、控制顺序连接，等待视频元数据；失败或取消时完整回滚。"""
         if self.running:
-            logger.warning("设备已连接，无需重复连接")
             return True
-
-        # 连接视频socket
-        video_socket = await setup_tunnel(self.serial, self.uds_name)
-        if video_socket is None:
-            logger.error(f"连接设备{self.serial}的视频socket失败")
+        if self._close_task is not None:
+            return False  # Each handle belongs to exactly one session.
+        try:
+            video = await setup_tunnel(
+                self.serial,
+                self.uds_name,
+                timeout=self.options.io_timeout,
+                close_timeout=self.options.close_timeout,
+            )
+            if video is None:
+                raise ConnectionError("视频隧道建立失败")
+            self.video_socket_reader, self.video_socket_writer = video
+            control = await setup_tunnel(
+                self.serial,
+                self.uds_name,
+                timeout=self.options.io_timeout,
+                close_timeout=self.options.close_timeout,
+            )
+            if control is None:
+                raise ConnectionError("控制隧道建立失败")
+            self.control_socket_reader, self.control_socket_writer = control
+            self.running = True
+            self.async_tasks = [
+                asyncio.create_task(self.process_video_upstream()),
+                asyncio.create_task(self.process_control_upstream()),
+            ]
+            await asyncio.wait_for(self._ready.wait(), self.options.io_timeout)
+            if not self.running:
+                raise ConnectionError(self.disconnect_reason)
+            return True
+        except asyncio.CancelledError:
+            await self.disconnect_sockets("连接已取消")
+            raise
+        except Exception as error:
+            await self.disconnect_sockets(f"连接失败：{error!r}")
             return False
 
-        self.video_socket_reader, self.video_socket_writer = video_socket
-        video_task = asyncio.create_task(self.process_video_upstream())
+    async def _read_metadata(self) -> None:
+        reader = self.video_socket_reader
+        metadata = await reader.readexactly(77)
+        if metadata[0] != 0 or metadata[65:69] != b"h264":
+            raise ValueError("无效的视频握手或不支持的编码器")
+        self.screen_width = from_u32_be(metadata[69:73])
+        self.screen_height = from_u32_be(metadata[73:77])
+        if self.screen_width <= 0 or self.screen_height <= 0:
+            raise ValueError("无效的屏幕尺寸")
+        logger.info(f"设备名称：{decode_lossy_utf8(metadata[1:65])}")
 
-        # 连接控制socket
-        control_socket = await setup_tunnel(
-            self.serial, self.uds_name.replace("video", "control")
-        )
-        if control_socket is None:
-            logger.error(f"连接设备{self.serial}的控制socket失败")
-            # 关闭视频socket
-            self.video_socket_writer.close()
-            self.video_socket_writer = None
-            self.video_socket_reader = None
-            video_task.cancel()
-            return False
+    async def _read_packet(self, first: bytes):
+        reader = self.video_socket_reader
+        header = first + await reader.readexactly(11)
+        size = from_u32_be(header[8:])
+        if not 0 < size <= 64 * 1024 * 1024:
+            raise ValueError("无效的视频包长度")
+        return decode_frame_header(header[:8]), await reader.readexactly(size)
 
-        self.control_socket_reader, self.control_socket_writer = control_socket
-        control_task = asyncio.create_task(self.process_control_upstream())
-
-        self.running = True
-        self.async_tasks.append(video_task)
-        self.async_tasks.append(control_task)
-        return True
+    async def _replace_decoder(self, data: bytes) -> None:
+        if self.h264_decoder is not None:
+            await self.h264_decoder.close_decoder()
+            self.h264_decoder = None
+        self.h264_decoder = await asyncio.to_thread(create_h264_decoder, data)
+        if self.h264_decoder is None:
+            raise RuntimeError("创建 H.264 解码器失败")
+        self.screen_width = self.h264_decoder.width
+        self.screen_height = self.h264_decoder.height
 
     async def process_video_upstream(self) -> None:
+        reason = "视频流 EOF"
         try:
-            # 1字节的确认包
-            await self.video_socket_reader.readexactly(1)
-            # 64字节的设备名称
-            device_name_data = await self.video_socket_reader.readexactly(64)
-            logger.info(f"设备名称: {decode_lossy_utf8(device_name_data)}")
-            # 12字节，包含编码器ID，屏幕宽度和高度
-            codec_id = from_u32_be(await self.video_socket_reader.readexactly(4))
-            self.screen_width = from_u32_be(
-                await self.video_socket_reader.readexactly(4)
-            )
-            self.screen_height = from_u32_be(
-                await self.video_socket_reader.readexactly(4)
-            )
-            logger.info(
-                f"编码器ID: 0x{codec_id:x}, 屏幕宽度: {self.screen_width}, 屏幕高度: {self.screen_height}"
-            )
-
-            # 接下来是每一帧的数据了，每个数据块的前4字节是数据长度
-            while self.running and self.video_socket_reader is not None:
-                frame_header = decode_frame_header(
-                    await self.video_socket_reader.readexactly(8)
+            await asyncio.wait_for(self._read_metadata(), self.options.io_timeout)
+            self._ready.set()
+            while self.running:
+                # A static screen may legitimately produce no new packets.
+                first = await self.video_socket_reader.readexactly(1)
+                header, data = await asyncio.wait_for(
+                    self._read_packet(first), self.options.io_timeout
                 )
-                frame_size = from_u32_be(await self.video_socket_reader.readexactly(4))
-                frame_data = await self.video_socket_reader.readexactly(frame_size)
-
-                if frame_header.config_flag:
-                    # 收到sps/pps，开始重建编码器
-                    async with self._mutex:
-                        if self.h264_decoder is not None:
-                            await self.h264_decoder.close_decoder()
-                        new_decoder = create_h264_decoder(frame_data)
-                        if new_decoder is None:
-                            logger.error("创建H264解码器失败")
-                            break
-
-                        self.h264_decoder = new_decoder
-                        self.screen_width = self.h264_decoder.width
-                        self.screen_height = self.h264_decoder.height
-
-                    logger.info(
-                        f"解码器创建成功，屏幕宽度: {self.screen_width}, 屏幕高度: {self.screen_height}"
-                    )
-                else:
-                    # 直接进行解码
-                    success = False
-                    async with self._mutex:
-                        if self.h264_decoder is not None:
-                            success = self.h264_decoder.enqueue_frame(
-                                frame_header.key_flag, frame_data, frame_header.pts
-                            )
-
-                    if not success:
-                        logger.error("解码帧失败")
+                async with self._mutex:
+                    if not self.running:
                         break
-
+                    if header.config_flag:
+                        # Installing the result is part of the protected operation:
+                        # cancellation must not orphan a newly created native handle.
+                        await complete_on_cancel(self._replace_decoder(data))
+                    elif (
+                        self.h264_decoder is None
+                        or not self.h264_decoder.enqueue_frame(
+                            header.key_flag, data, header.pts
+                        )
+                    ):
+                        raise RuntimeError("解码帧失败")
         except IncompleteReadError:
-            # 这个没问题，因为要关闭了
             pass
-        except Exception as e:
-            logger.error(f"读取视频流时发生异常：{e}")
+        except asyncio.CancelledError:
+            reason = "视频接收已取消"
+            raise
+        except Exception as error:
+            reason = f"视频接收失败：{error!r}"
         finally:
-            self.running = False
-            logger.info("视频流已退出")
+            self._stop(reason)
+            self._ready.set()
 
     async def process_control_upstream(self) -> None:
+        reason = "控制流 EOF"
         try:
-            # 这个比较简单，没啥数据有价值，读出来扔掉
             while self.running and self.control_socket_reader is not None:
-                await self.control_socket_reader.read()
-        except Exception:
-            pass
+                if not await self.control_socket_reader.read(4096):
+                    break
+        except asyncio.CancelledError:
+            reason = "控制接收已取消"
+            raise
+        except Exception as error:
+            reason = f"控制接收失败：{error!r}"
         finally:
-            self.running = False
-            logger.info("控制流已退出")
+            self._stop(reason)
 
-    async def disconnect_sockets(self) -> None:
-        # 先优雅退出
+    def _stop(self, reason: str) -> None:
         self.running = False
-        await asyncio.sleep(0.5)
+        self._stopped.set()
+        if self._close_task is None:
+            self.disconnect_reason = reason
+            self._close_task = asyncio.create_task(self._cleanup())
 
-        # 关闭视频socket
-        if self.video_socket_writer is not None:
-            self.video_socket_writer.close()
-            self.video_socket_writer = None
-        self.video_socket_reader = None
+    async def _cleanup(self) -> None:
+        try:
+            tasks, self.async_tasks = self.async_tasks, []
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            writers = [self.video_socket_writer, self.control_socket_writer]
+            self.video_socket_writer = self.control_socket_writer = None
+            self.video_socket_reader = self.control_socket_reader = None
+            results = await asyncio.gather(
+                *(
+                    close_writer(writer, self.options.close_timeout)
+                    for writer in writers
+                    if writer is not None
+                ),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning(f"关闭流失败：{result!r}")
+            async with self._mutex:
+                if self.h264_decoder is not None:
+                    await self.h264_decoder.close_decoder()
+                    self.h264_decoder = None
+            self.screen_width = self.screen_height = 0
+        finally:
+            self._closed.set()
 
-        # 关闭控制socket
-        if self.control_socket_writer is not None:
-            self.control_socket_writer.close()
-            self.control_socket_writer = None
-        self.control_socket_reader = None
+    async def disconnect_sockets(self, reason: str = "主动断开") -> None:
+        """幂等关闭本会话，确认接收任务和解码器退出后返回。"""
+        self._stop(reason)
+        await complete_on_cancel(self._close_task)
 
-        for task in self.async_tasks:
-            task.cancel()
-        self.async_tasks.clear()
-        await asyncio.sleep(0.5)
-
-        # 释放编码器
-        async with self._mutex:
-            if self.h264_decoder is not None:
-                await self.h264_decoder.close_decoder()
-                self.h264_decoder = None
+    async def wait_disconnected(self) -> str:
+        """等待本句柄清理完成，返回首次断连原因。"""
+        await self._closed.wait()
+        if self._close_task is not None:
+            await asyncio.shield(self._close_task)
+        return self.disconnect_reason or "已断开"
 
     async def get_current_frame(self) -> tuple[int, int, bytes] | None:
-        """
-        获取当前视频帧的BGRA数据
-        :return: 如果获取成功，则返回一个元组，包含帧的宽度、高度和像素数据；否则返回None
+        """获取当前视频帧的BGRA数据
+
+        Returns:
+            如果获取成功，则返回一个元组，包含帧的宽度、高度和像素数据；否则返回None
         """
         if not self.running:
             logger.warning("设备未连接，无法获取视频帧")
@@ -209,16 +245,19 @@ class DeviceControlHandle:
 
         # 这个要加锁操作
         async with self._mutex:
-            if self.h264_decoder is None:
+            if not self.running or self.h264_decoder is None:
                 return None
 
             return await self.h264_decoder.get_current_frame_bgra8()
 
     async def send_event(self, data: bytes) -> bool:
-        """
-        发送事件到设备，这是一个通用方法，组装好请求体就能发生
-        :param data: 事件数据
-        :return: 如果发送成功，则返回True；否则返回False
+        """发送事件到设备，这是一个通用方法，组装好请求体就能发生
+
+        Args:
+            data: 事件数据
+
+        Returns:
+            如果发送成功，则返回True；否则返回False
         """
         if not self.running or self.control_socket_writer is None:
             logger.warning("控制socket未连接，无法发送事件")
@@ -227,19 +266,25 @@ class DeviceControlHandle:
         try:
             # 写入，然后立即冲刷
             self.control_socket_writer.write(data)
-            await self.control_socket_writer.drain()
+            await asyncio.wait_for(
+                self.control_socket_writer.drain(), self.options.io_timeout
+            )
             return True
         except Exception as e:
             logger.error(f"发送事件到设备失败：{e}")
+            self._stop(f"控制发送失败：{e!r}")
             return False
 
     async def send_gesture_event(self, x: int, y: int, action: int) -> bool:
-        """
-        发送手势事件到设备（这个方法太常用了，所以单独拎出来）
-        :param x: 事件坐标x
-        :param y: 事件坐标y
-        :param action: 事件动作，取值来自于GestureAction的枚举值
-        :return: 如果发送成功，则返回True；否则返回False
+        """发送手势事件到设备（这个方法太常用了，所以单独拎出来）
+
+        Args:
+            x: 事件坐标x
+            y: 事件坐标y
+            action: 事件动作，取值来自于GestureAction的枚举值
+
+        Returns:
+            如果发送成功，则返回True；否则返回False
         """
         # 组装字节数组，前面的东西是固定的
         data = bytes([0x02, action, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD])

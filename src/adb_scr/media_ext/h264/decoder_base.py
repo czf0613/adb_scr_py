@@ -5,7 +5,12 @@ __all__ = []
 
 
 class H264DecoderBase(ABC):
-    """这个类没有保证线程安全，所以调用方要自己想点办法保证线程安全，防止并发修改state导致崩溃"""
+    """内部解码器接口。
+
+    Notes:
+        调用方必须协调入队、取帧、替换和关闭的生命周期。控制句柄通过
+        asyncio.Lock 提供同一事件循环内的保护；不要跨事件循环共享实例。
+    """
 
     if TYPE_CHECKING:
         # 该解码器是否还有效
@@ -15,7 +20,9 @@ class H264DecoderBase(ABC):
 
     def __init__(self) -> None:
         """子类实现这个方法时需要顺带初始化内部的解码器句柄，所以这个方法可能会抛出异常（类里面的其它方法不会）
-        :raises AdbScrPyH264DecoderException: 如果初始化失败，则抛出此异常
+
+        Raises:
+            AdbScrPyH264DecoderException: 如果初始化失败，则抛出此异常
         """
         self.valid = False
         self.width = 0
@@ -30,19 +37,24 @@ class H264DecoderBase(ABC):
 
     @abstractmethod
     def enqueue_frame(self, is_idr: bool, nalu: bytes, pts: int) -> bool:
-        """
-        向解码器句柄队列中入队一帧NALU数据。这个方法严禁阻塞，比如立刻丢入队列中然后迅速返回。
-        :param is_idr: 是否为IDR帧
-        :param nalu: NALU数据(0x00 0x00 0x00 0x01开头的格式)
-        :param pts: 帧的PTS值，看具体解码器的约定
-        :return: 如果入队成功，则返回True；否则返回False
+        """快速提交一帧 H.264 数据供异步解码。
+
+        Args:
+            is_idr: 是否为 IDR 关键帧。
+            nalu: 以 Annex B 起始码分隔的 H.264 数据。
+            pts: 显示时间戳，单位为微秒。
+
+        Returns:
+            成功接收或因首个 IDR 尚未到达而跳过时为 True，失败时为 False。
+            True 不表示解码已完成。
         """
         pass
 
     @abstractmethod
     async def get_current_frame_bgra8(self) -> tuple[int, int, bytes] | None:
-        """
-        获取当前视频帧的BGRA8数据。
-        :return: 如果获取成功，则返回一个元组，包含视频的宽度、高度和BGRA8格式的视频帧数据；否则返回None
+        """获取当前视频帧的BGRA8数据。
+
+        Returns:
+            如果获取成功，则返回一个元组，包含视频的宽度、高度和BGRA8格式的视频帧数据；否则返回None
         """
         pass

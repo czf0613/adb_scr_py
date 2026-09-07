@@ -1,24 +1,32 @@
-from asyncio import Lock
 import asyncio
-from typing import TYPE_CHECKING, final
-from asyncio.subprocess import Process
+import math
 import random
-from ..adb_cmd.base import adb_connect, adb_disconnect
+from asyncio import Lock
+from asyncio.subprocess import Process
+from collections.abc import Awaitable
+from typing import TYPE_CHECKING, final
+
 from .. import consts
-from ..logger import logger
+from ..adb_cmd.base import adb_connect, adb_device_cmd, adb_disconnect
 from ..adb_cmd.device_control import (
+    launch_app,
     push_file,
     start_scrcpy_server,
-    launch_app,
     stop_app,
 )
-from .control_handle import DeviceControlHandle
-from .bin_utils import random_sleep_ms, to_u32_be
+from ..async_utils import complete_on_cancel, stop_process
+from ..logger import logger
 from ..media_ext import bgra8_to_jpg
+from .bin_utils import random_sleep_ms, to_u32_be
+from .control_handle import DeviceControlHandle
+from .options import ConnectionOptions
 from .types import ConnectionType, GestureAction, GestureActionNode
-import math
 
 __all__ = []
+
+
+class _DisconnectEvent(asyncio.Event):
+    disconnect_reason: str | None = None
 
 
 @final
@@ -34,15 +42,30 @@ class AndroidDevice:
         control_handle: DeviceControlHandle | None
         _mutex: Lock
 
-    def __init__(self, serial: str, connection_type: ConnectionType) -> None:
-        """
-        初始化AndroidDevice对象
+    def __init__(
+        self,
+        serial: str,
+        connection_type: ConnectionType,
+        *,
+        options: ConnectionOptions | None = None,
+    ) -> None:
+        """创建一个设备会话管理对象，不立即连接。
 
-        :param serial: 设备序列号/IP地址，可以通过adb devices命令查看。如果是USB设备，
-        则为设备的序列号，例如：emulator-5554。如果是网络设备，
-        则为设备的IP地址+端口，例如：192.168.1.100:5555
-        :param connection_type: 设备连接类型，目前只支持tcp和usb
+        Args:
+            serial: USB 序列号，或已启用网络调试设备的 IP:端口。
+            connection_type: "usb" 或 "tcp"。
+            options: 连接、I/O、关闭及存活探测配置；None 使用默认值。
+
+        Notes:
+            一个实例及其异步方法应在同一事件循环中使用。
         """
+        self.options = options or ConnectionOptions()
+        self.control_handle = None
+        self._monitor_task: asyncio.Task | None = None
+        self._tcp_owned = False
+        self._disconnected = _DisconnectEvent()
+        self._disconnected.set()
+        self.last_disconnect_reason: str | None = None
         self.serial = serial
         self.connection_type = connection_type
         # scid是一个0到2^31的整数，按照%08x的格式展示的字符串
@@ -51,112 +74,237 @@ class AndroidDevice:
         self.scrcpy_server_process = None
         self._mutex = Lock()
 
-    async def connect(self) -> bool:
+    @property
+    def is_connected(self) -> bool:
+        """当前会话是否可用；不主动探测网络，不表示首帧已经解码。"""
+        return (
+            self.control_handle is not None
+            and self.control_handle.running
+            and self.scrcpy_server_process is not None
+            and self.scrcpy_server_process.returncode is None
+        )
+
+    async def wait_disconnected(self) -> str | None:
+        """等待调用开始时的会话清理完成。
+
+        Returns:
+            首次断连原因。实例尚未连接过时立即返回 None；已断开时立即返回
+            最近会话的原因。后续重连不改变已开始等待的会话结果。
+
+        Raises:
+            asyncio.CancelledError: 等待被取消；不会因此断开设备。
+
+        Notes:
+            可使用 asyncio.wait_for() 限制调用方的等待时间。
         """
-        连接设备
-        :return: 如果连接成功，则返回True；否则返回False
+        event = self._disconnected
+        await event.wait()
+        return event.disconnect_reason
+
+    async def connect(self) -> bool:
+        """连接设备并等待视频元数据就绪。
+
+        Returns:
+            成功返回 True；连接失败或超时后回收资源并返回 False。
+            已有有效会话时返回 True，失败或断开后可在同一实例上重新连接。
+
+        Raises:
+            asyncio.CancelledError: 调用被取消，已取得的会话资源会先被回收。
+
+        Notes:
+            调用前必须完成 init_lib()。返回 True 表示两条流和屏幕尺寸已就绪，
+            不保证已有解码帧。连接预算从取得设备锁后开始，清理可额外耗时。
+            不自动重连。
         """
         async with self._mutex:
-            if self.scrcpy_server_process is not None:
-                logger.warning(f"设备{self.serial}已经连接，无需重复连接")
+            if self.is_connected:
                 return True
+            await complete_on_cancel(self._disconnect_locked("清理旧会话"))
+            self._disconnected = _DisconnectEvent()
+            self.last_disconnect_reason = None
+            try:
+                await asyncio.wait_for(
+                    self._connect_session(), self.options.connect_timeout
+                )
+                if not self.is_connected:
+                    raise ConnectionError("会话在连接期间退出")
+                self._monitor_task = asyncio.create_task(self._supervise())
+                return True
+            except asyncio.CancelledError:
+                await complete_on_cancel(self._disconnect_locked("连接已取消"))
+                raise
+            except Exception as error:
+                await complete_on_cancel(
+                    self._disconnect_locked(f"连接失败：{error!r}")
+                )
+                return False
 
-            # 如果是网络设备，这里还要执行一步connect
-            if self.connection_type == "tcp":
-                logger.info(f"尝试连接TCP设备{self.serial}")
-                if not await adb_connect(self.serial) == 0:
-                    logger.error(f"连接设备{self.serial}失败")
-                    return False
+    async def _connect_session(self) -> None:
+        if self.connection_type == "tcp":
+            self._tcp_owned = True
+            if await adb_connect(self.serial, timeout=self.options.io_timeout) != 0:
+                raise ConnectionError("ADB 网络连接失败")
+        if not await push_file(
+            self.serial, consts.SCRCPY_SERVER_PATH, consts.SCRCPY_PATH_ON_DEVICE
+        ):
+            raise ConnectionError("推送 scrcpy server 失败")
+        self.scrcpy_server_process = await start_scrcpy_server(self.serial, self.scid)
+        if self.scrcpy_server_process is None:
+            raise ConnectionError("启动 scrcpy server 失败")
+        self.control_handle = DeviceControlHandle(
+            self.serial, self.scid, options=self.options
+        )
+        if not await self.control_handle.connect_sockets():
+            raise ConnectionError(self.control_handle.disconnect_reason)
 
-            # 推送dex过去
-            if not await push_file(
-                self.serial, consts.SCRCPY_SERVER_PATH, consts.SCRCPY_PATH_ON_DEVICE
+    async def _probe(self) -> str:
+        failures = 0
+        while True:
+            await asyncio.sleep(self.options.probe_interval)
+            # A device-side no-op checks transport liveness without touching UI.
+            if await adb_device_cmd(
+                self.serial, "shell", "true", timeout=self.options.io_timeout
             ):
-                logger.error(f"推送scrcpy server到设备{self.serial}失败")
-                return False
-
-            # 启动scrcpy server
-            sub_process = await start_scrcpy_server(self.serial, self.scid)
-            if sub_process is None:
-                logger.error(f"启动scrcpy server在设备{self.serial}失败")
-                return False
+                failures = 0
             else:
-                self.scrcpy_server_process = sub_process
-                logger.info(f"成功启动scrcpy server在设备{self.serial}")
+                failures += 1
+                if failures >= self.options.probe_failures:
+                    return "设备存活探测连续失败"
 
-            # 启动socket
-            handle = DeviceControlHandle(self.serial, self.scid)
-            if not await handle.connect_sockets():
-                logger.error(f"连接设备{self.serial}的控制socket失败")
-                return False
-            self.control_handle = handle
+    async def _supervise(self) -> None:
+        handle = self.control_handle
+        process = self.scrcpy_server_process
+        stream_task = asyncio.create_task(handle.wait_disconnected())
+        process_task = asyncio.create_task(process.wait())
+        tasks = [stream_task, process_task]
+        if self.options.probe_interval is not None:
+            tasks.append(asyncio.create_task(self._probe()))
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if stream_task in done:
+                reason = stream_task.result()
+            elif process_task in done:
+                reason = f"scrcpy 进程退出：{process_task.result()}"
+            else:
+                reason = tasks[-1].result()
+            handle._stop(reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            reason = f"会话监控失败：{error!r}"
+            handle._stop(reason)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await complete_on_cancel(asyncio.gather(*tasks, return_exceptions=True))
+        async with self._mutex:
+            if self.control_handle is handle:
+                await complete_on_cancel(
+                    self._disconnect_locked(reason, skip_monitor=True)
+                )
 
-            return True
+    async def _disconnect_locked(
+        self, reason: str, *, skip_monitor: bool = False
+    ) -> None:
+        monitor, self._monitor_task = self._monitor_task, None
+        if monitor is not None and not skip_monitor:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+        handle, self.control_handle = self.control_handle, None
+        process, self.scrcpy_server_process = self.scrcpy_server_process, None
+        had_session = not self._disconnected.is_set()
+        try:
+            operations = []
+            if handle is not None:
+                operations.append(handle.disconnect_sockets(reason))
+            if process is not None:
+                operations.append(stop_process(process, self.options.close_timeout))
+            if self._tcp_owned:
+                self._tcp_owned = False
+                operations.append(
+                    adb_disconnect(self.serial, timeout=self.options.close_timeout)
+                )
+            results = await asyncio.gather(*operations, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning(f"会话清理失败：{result!r}")
+            if had_session:
+                self.last_disconnect_reason = (
+                    handle.disconnect_reason if handle is not None else None
+                ) or reason
+        finally:
+            self._disconnected.disconnect_reason = self.last_disconnect_reason
+            self._disconnected.set()
 
     async def disconnect(self) -> None:
+        """断开当前会话，等待接收任务、探测任务、流及原生资源清理。
+
+        Raises:
+            asyncio.CancelledError: 取消在已开始的清理完成后传播。
+
+        Notes:
+            重复调用安全。流和子进程关闭异常会记录日志；原生销毁必须等待
+            VideoToolbox/GCD 工作完成，不能用硬超时强制释放在用内存。
         """
-        断开设备连接
-        :return: None
-        """
+        if self.control_handle is not None and self.control_handle.running:
+            self.control_handle._stop("主动断开")
         async with self._mutex:
-            if self.scrcpy_server_process is None:
-                logger.warning(f"设备{self.serial}未连接，无需断开")
-                return
-
-            # 终止scrcpy server进程
-            if self.scrcpy_server_process is not None:
-                self.scrcpy_server_process.kill()
-                self.scrcpy_server_process = None
-                logger.info(f"成功终止scrcpy server在设备{self.serial}")
-
-            # 断开控制socket
-            if self.control_handle is not None:
-                await self.control_handle.disconnect_sockets()
-                self.control_handle = None
-                logger.info(f"成功断开设备{self.serial}的socket")
-
-            # 如果是网络设备，这里还要执行一步disconnect
-            if self.connection_type == "tcp":
-                logger.info(f"尝试断开TCP设备{self.serial}")
-                await adb_disconnect(self.serial)
+            await complete_on_cancel(self._disconnect_locked("主动断开"))
 
     async def launch_app(self, package_name: str, activity_name: str) -> bool:
-        """
-        启动设备上的应用
-        :param package_name: 应用包名
-        :param activity_name: 应用主活动名
-        :return: 是否成功
+        """启动设备上的应用
+
+        Args:
+            package_name: 应用包名
+            activity_name: 应用主活动名
+
+        Returns:
+            是否成功
         """
         async with self._mutex:
             return await launch_app(self.serial, package_name, activity_name)
 
     async def stop_app(self, package_name: str) -> bool:
-        """
-        停止设备上的应用
-        :param package_name: 应用包名
-        :return: 是否成功
+        """停止设备上的应用
+
+        Args:
+            package_name: 应用包名
+
+        Returns:
+            是否成功
         """
         async with self._mutex:
             return await stop_app(self.serial, package_name)
 
     def get_screen_size(self) -> tuple[int, int] | None:
+        """读取当前屏幕尺寸。
+
+        Returns:
+            (width, height)，单位为像素；会话不可用时返回 None。
+
+        Notes:
+            坐标原点为左上角，有效范围为 0 <= x < width、0 <= y < height。
+            屏幕旋转后尺寸可随新的视频配置更新。
         """
-        获取屏幕长宽。屏幕坐标系统是0-based索引，左上角为(0,0)，右下角为(width-1,height-1)
-        注意，刚刚connect好的时候，由于屏幕数据可能还没及时送达，读取的结果可能是错的
-        建议等待几百毫秒之后再尝试
-        :return: 返回 (width, height) 元组，如果获取失败则返回 None
-        """
-        if self.control_handle is None:
+        if not self.is_connected:
             logger.warning("设备未连接，无法获取屏幕尺寸")
             return None
 
         return self.control_handle.screen_width, self.control_handle.screen_height
 
     async def get_screenshot_jpg(self, quality: int = 75) -> bytes | None:
-        """
-        获取当前屏幕截图的jpg数据
-        （这个方法效率不是很高，内部有锁，不建议高频调用或利用这个接口重编码为视频流）
-        :return: 返回jpg格式的字节数据，如果获取失败则返回 None
+        """将最新解码帧编码为 JPEG。
+
+        Args:
+            quality: JPEG 质量，调用方应传入 1 到 100 的整数，默认 75。
+
+        Returns:
+            JPEG bytes；未连接、尚无解码帧或编码失败时返回 None。
+
+        Notes:
+            返回的是独立 bytes，多次调用可能得到同一帧。取帧转换及编码有
+            分配和复制开销；没有固定的 5 FPS 限制或吞吐保证。耗时原生操作
+            使用工作线程；取消取帧会等待在途原生读取结束。
         """
         if self.control_handle is None:
             logger.warning("设备未连接，无法获取屏幕截图")
@@ -178,12 +326,15 @@ class AndroidDevice:
         return jpg_data
 
     def _check_in_screen(self, x: int, y: int) -> bool:
-        """
-        检查坐标是否在屏幕内，防止后续操作出现意外。
+        """检查坐标是否在屏幕内，防止后续操作出现意外。
         屏幕坐标依然遵循0-based索引，所以1920x1080的屏幕，最大坐标为1919,1079
-        :param x: x坐标
-        :param y: y坐标
-        :return: 是否在屏幕内
+
+        Args:
+            x: x坐标
+            y: y坐标
+
+        Returns:
+            是否在屏幕内
         """
         size = self.get_screen_size()
         if size is None:
@@ -192,12 +343,40 @@ class AndroidDevice:
         width, height = size
         return 0 <= x < width and 0 <= y < height
 
+    async def _gesture_wait(self, delay: Awaitable[None]) -> bool:
+        """等待手势间隔或会话停止，避免长手势阻塞资源回收。"""
+        sleep_task = asyncio.ensure_future(delay)
+        handle = self.control_handle
+        if handle is None:
+            sleep_task.cancel()
+            await asyncio.gather(sleep_task, return_exceptions=True)
+            return False
+        stopped = asyncio.create_task(handle._stopped.wait())
+        try:
+            done, _ = await asyncio.wait(
+                [sleep_task, stopped], return_when=asyncio.FIRST_COMPLETED
+            )
+            if sleep_task in done:
+                sleep_task.result()
+            return handle.running
+        finally:
+            sleep_task.cancel()
+            stopped.cancel()
+            await complete_on_cancel(
+                asyncio.gather(sleep_task, stopped, return_exceptions=True)
+            )
+
     async def long_press(self, x: int, y: int, duration_ms: int) -> None:
-        """
-        长按屏幕上的某个位置
-        :param x: x坐标
-        :param y: y坐标
-        :param duration: 长按持续时间（秒）
+        """在指定坐标按下并保持，然后抬起。
+
+        Args:
+            x: 横坐标，单位为像素。
+            y: 纵坐标，单位为像素。
+            duration_ms: 持续时间，单位为毫秒，调用方应传入非负整数。
+
+        Notes:
+            无有效会话或坐标越界时记录日志并返回。返回 None 不代表设备 UI
+            已执行动作；断连后无法保证最终抬起消息送达。
         """
         if not self._check_in_screen(x, y):
             logger.error(f"坐标({x},{y})不在屏幕内，拒绝执行")
@@ -208,24 +387,30 @@ class AndroidDevice:
                 logger.warning("设备未连接，无法执行长按操作")
                 return
 
-            await self.control_handle.send_gesture_event(x, y, GestureAction.DOWN.value)
-            await asyncio.sleep(float(duration_ms) / 1000)
+            if not await self.control_handle.send_gesture_event(
+                x, y, GestureAction.DOWN.value
+            ):
+                return
+            if not await self._gesture_wait(asyncio.sleep(float(duration_ms) / 1000)):
+                return
             await self.control_handle.send_gesture_event(x, y, GestureAction.UP.value)
 
     async def click(self, x: int, y: int) -> None:
-        """
-        单击屏幕上的某个位置
-        :param x: x坐标
-        :param y: y坐标
+        """单击屏幕上的某个位置
+
+        Args:
+            x: x坐标
+            y: y坐标
         """
         # 相当于一个时间很短的"long_press"
         await self.long_press(x, y, random.randint(150, 220))
 
     async def double_click(self, x: int, y: int) -> None:
-        """
-        双击屏幕上的某个位置
-        :param x: x坐标
-        :param y: y坐标
+        """双击屏幕上的某个位置
+
+        Args:
+            x: x坐标
+            y: y坐标
         """
         # 相当于快速的两次click
         await self.click(x, y)
@@ -244,17 +429,19 @@ class AndroidDevice:
             await self.control_handle.send_event(
                 bytes([0x04, GestureAction.DOWN.value])
             )
-            await random_sleep_ms(80, 150)
+            if not await self._gesture_wait(random_sleep_ms(80, 150)):
+                return
             await self.control_handle.send_event(bytes([0x04, GestureAction.UP.value]))
 
     async def swipe(self, x1: int, y1: int, x2: int, y2: int) -> None:
-        """
-        一个简化的方便版本，用于执行一个简单的滑动操作。
+        """一个简化的方便版本，用于执行一个简单的滑动操作。
         里面用到了一些插帧操作，确保滑动过程中尽量丝滑。
-        :param x1: 滑动开始的x坐标
-        :param y1: 滑动开始的y坐标
-        :param x2: 滑动结束的x坐标
-        :param y2: 滑动结束的y坐标
+
+        Args:
+            x1: 滑动开始的x坐标
+            y1: 滑动开始的y坐标
+            x2: 滑动结束的x坐标
+            y2: 滑动结束的y坐标
         """
         STEPPING = 25.0
         SPEED_RATIO = 1.85
@@ -294,17 +481,19 @@ class AndroidDevice:
     async def action_series(
         self, actions: list[GestureActionNode], check: bool = True
     ) -> None:
-        """
-        执行一系列的手势操作，用于模拟复杂的手指操作，比如玩游戏或者拖拽等等。
-        正常情况下，list开头的操作一定是一个DOWN，结尾的操作一定是一个UP，毕竟手指肯定会按下然后抬起。
-        除非是在处理游戏或者某些需要打破这个常规的操作，所以默认会检查这个条件，不符合条件的会拒绝执行。
-        你如果很确定自己在干什么，可以将check参数设为False来跳过这个检查。
-        假如你DOWN之后没有UP，将会导致手机认为一直有一根手指放在某个地方，所以check=False是一个非常危险的操作！
+        """按顺序发送单指手势节点。
 
-        :param actions: 要执行的手势操作列表，每一个节点表示，在某个坐标处执行某个操作，然后等待duration_ms后继续下一个操作。
-        每个节点（除了最后一个）的duration_ms都不建议设为0，因为这样会导致操作之间的间隔过短，手机可能会无法响应高速的操作。
-        最后一个节点的duration_ms不会被忽略，但是建议你填0，除非你认为最后等待若干毫秒是有必要的。
-        每个节点的duration_ms都不能大于10000（10秒），否则会被拒绝执行。（check=False时例外）
+        Args:
+            actions: 节点列表；每个节点发送后按 duration_ms 加入随机等待，
+                最后一个节点也适用。空列表不执行操作。
+            check: 默认 True，检查节点数量、持续时间和相邻动作转换。
+                False 跳过这些检查，但仍检查全部坐标。
+
+        Notes:
+            调用方应以 DOWN 开始、UP 结束。当前实现检查相邻状态转换，
+            但没有额外验证最终状态必须为 UP。check=True 时持续时间范围
+            为 0 到 10000 毫秒；等待含随机扰动，不是精确的计时接口。
+            检查失败时记录日志并返回；返回值不表示动作执行确认。
         """
         if len(actions) == 0:
             return
@@ -323,7 +512,7 @@ class AndroidDevice:
             for action in actions:
                 # 检查duration_ms是否符合要求
                 if action.duration_ms > 10000 or action.duration_ms < 0:
-                    logger.error(f"节点的duration_ms异常，拒绝执行")
+                    logger.error("节点的duration_ms异常，拒绝执行")
                     return
 
             # 跑一下状态机检测一下手指的状态有没有不合理的
@@ -356,20 +545,25 @@ class AndroidDevice:
 
             # 发送事件
             for node in actions:
-                await self.control_handle.send_gesture_event(
+                if not await self.control_handle.send_gesture_event(
                     node.x, node.y, node.action.value
-                )
+                ):
+                    return
 
                 if node.duration_ms > 0:
                     # 添加一点扰动避免检测
-                    await random_sleep_ms(
-                        min(1, node.duration_ms - 10), node.duration_ms + 10
-                    )
+                    if not await self._gesture_wait(
+                        random_sleep_ms(
+                            min(1, node.duration_ms - 10), node.duration_ms + 10
+                        )
+                    ):
+                        return
 
     async def paste(self, text: str) -> None:
-        """
-        粘贴文本到设备。执行这个操作时，需要先将设备焦点切换到文本输入框，否则是无效的
-        :param text: 要粘贴的文本
+        """粘贴文本到设备。执行这个操作时，需要先将设备焦点切换到文本输入框，否则是无效的
+
+        Args:
+            text: 要粘贴的文本
         """
         async with self._mutex:
             if self.control_handle is None:

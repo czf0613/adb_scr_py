@@ -112,7 +112,10 @@ bool vth_nv12_to_bgra8(CVPixelBufferRef frame, uint8_t **out_bgra8,
   });
 
   // 读取nv12数据
-  CVPixelBufferLockBaseAddress(frame, kCVPixelBufferLock_ReadOnly);
+  if (CVPixelBufferLockBaseAddress(frame, kCVPixelBufferLock_ReadOnly) !=
+      kCVReturnSuccess) {
+    return false;
+  }
   size_t frame_width = CVPixelBufferGetWidth(frame),
          frame_height = CVPixelBufferGetHeight(frame);
   void *y = CVPixelBufferGetBaseAddressOfPlane(frame, 0),

@@ -1,31 +1,14 @@
 # adb_scr_py
 
-使用 ADB 协议在电脑上控制 Android 手机，并能高效获取屏幕显示的内容。
+通过 ADB 和 scrcpy 控制 Android 设备，并使用 macOS VideoToolbox 解码屏幕视频。Python 导入名为 `adb_scr`。
 
-## 特性
-
-- 🚀 **高性能**：多媒体处理调用C扩展且利用硬件加速。可以轻松批量连接多台手机（至少5台以上）
-- 📱 **多种连接方式**：支持 USB 和 TCP（网络）连接
-- 🎯 **完整的控制功能**：点击、双击、长按、返回键、粘贴文本等
-- 📸 **屏幕截图**：实时获取屏幕内容，支持自定义 JPG 质量
-- 🎬 **应用管理**：启动和停止应用
-- 🧵 **异步调度**：基于 asyncio 管理连接，截图和解码器清理等操作通过工作线程调度
+支持 USB 和网络调试连接、点击/滑动/长按/粘贴、应用启动与停止，以及按需 JPEG 截图。内部保留 BGRA8 原始帧通路，供 NumPy/OpenCV 消费；JPEG 是附加输出，不是原始帧的替代品。
 
 ## 安装
 
-### 系统要求
-
-- Python >= 3.10（本地开发和默认测试使用 Python 3.14）
-- macOS(x64或arm64都可以，但默认不提供x64的whl)
-- 已安装 ADB 工具
-
-### 安装方式
-
-```bash
-pip install adb_scr_py
-```
-
-或使用 uv：
+- Python 3.10 或更高版本；本地开发使用 3.14。
+- macOS，使用 VideoToolbox 硬件解码器。源码支持构建 arm64/x86_64，具体 wheel 可用性以发布文件为准。
+- 已安装 ADB，设备已授权 USB 调试，或已具备 ADB 网络调试条件。
 
 ```bash
 uv add adb_scr_py
@@ -33,226 +16,94 @@ uv add adb_scr_py
 
 ## 快速开始
 
-### 基本使用
+将示例序列号替换为自己的设备。网络设备使用 `AndroidDevice("192.168.1.100:5555", "tcp")`。
 
 ```python
 import asyncio
-from adb_scr import init_lib, deinit_lib, list_devices, AndroidDevice
+from pathlib import Path
 
-async def main():
-    # 初始化库（启动 ADB 守护进程等）
-    adb_version, scrcpy_version = await init_lib()
-    print(f"ADB 版本: {adb_version}, scrcpy 版本: {scrcpy_version}")
-    
-    # 列出已连接的设备
-    devices = await list_devices()
-    print(f"已连接设备: {devices}")
-    
-    # 连接设备
-    device = AndroidDevice("192.168.1.100:5555", "tcp")
-    if await device.connect():
-        print("设备连接成功")
-        
-        # 获取屏幕尺寸
-        await asyncio.sleep(0.5)  # 等待屏幕数据
-        size = device.get_screen_size()
-        if size:
-            print(f"屏幕尺寸: {size[0]}x{size[1]}")
-        
-        # 获取屏幕截图
-        jpg_data = await device.get_screenshot_jpg(quality=90)
-        if jpg_data:
-            with open("screenshot.jpg", "wb") as f:
-                f.write(jpg_data)
-            print("截图已保存")
-        
-        # 点击屏幕
-        await device.click(500, 500)
-        
-        # 断开连接
-        await device.disconnect()
-    
-    # 反初始化库
-    await deinit_lib()
+from adb_scr import AndroidDevice, deinit_lib, init_lib, set_screen_record_fps
+
+
+async def main() -> None:
+    await init_lib()
+    device = AndroidDevice("YOUR_DEVICE_SERIAL", "usb")
+    try:
+        set_screen_record_fps(30)  # 后续启动会话的上限，不改变正在运行的会话
+        if not await device.connect():
+            print(device.last_disconnect_reason)
+            return
+        print(device.get_screen_size())  # connect 已等待有效的视频元数据
+
+        # 解码首帧可能晚于连接成功；使用截止时间，而不是固定 sleep 猜测。
+        deadline = asyncio.get_running_loop().time() + 5
+        while device.is_connected:
+            jpg = await device.get_screenshot_jpg(quality=90)
+            if jpg is not None:
+                await asyncio.to_thread(Path("screenshot.jpg").write_bytes, jpg)
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                print("等待首帧超时")
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        try:
+            await device.disconnect()
+        finally:
+            await deinit_lib()
+
 
 asyncio.run(main())
 ```
 
-### USB 设备连接
+## 连接与断连
 
 ```python
-from adb_scr import AndroidDevice
+from adb_scr import AndroidDevice, ConnectionOptions
 
-# USB 设备使用设备的序列号
-device = AndroidDevice("emulator-5554", "usb")
-await device.connect()
+options = ConnectionOptions(
+    connect_timeout=30,
+    io_timeout=5,
+    close_timeout=5,
+    probe_interval=5,
+    probe_failures=3,
+)
+device = AndroidDevice("YOUR_DEVICE_SERIAL", "usb", options=options)
 ```
 
-### 网络设备连接
+EOF、接收/发送失败、服务端进程退出或设备存活探测连续失败会触发会话清理。`await device.wait_disconnected()` 等待清理完成并返回原因；`device.is_connected` 可读取当前状态。库不自动重连，调用方可在设备恢复后再次 `await device.connect()`。
 
-```python
-from adb_scr import AndroidDevice
+静态画面可能没有新视频帧，控制上行也可能长期无数据，因此不设置普通空闲读取超时。默认每 5 秒通过设备端 `shell true` 探测 transport，连续 3 次失败后断开；`probe_interval=None` 可禁用。探测不能证明编码器持续产帧，也不是精确的断连检测时限。
 
-# 网络设备使用 IP:端口 格式
-device = AndroidDevice("192.168.1.100:5555", "tcp")
-await device.connect()
-```
+## API 索引
 
-## API 文档
+| 入口 | 用途 |
+| --- | --- |
+| `await init_lib(adb_path=None)` | 初始化共享 ADB daemon |
+| `await list_devices()` | 获取 ADB 列出的序列号 |
+| `set_screen_record_fps(fps)` | 设置后续会话的帧率上限 |
+| `ConnectionOptions(...)` | 配置连接、I/O、关闭及存活探测 |
+| `AndroidDevice(...)` | 设备会话、截图及控制 API |
+| `GestureAction` / `GestureActionNode` | 单指手势序列 |
+| `await deinit_lib()` | 所有设备关闭后停止共享 daemon |
 
-### 模块函数
+完整签名、参数单位、失败行为和示例见 [API 参考](https://github.com/czf0613/adb_scr_py/blob/master/docs/api.md)（仓库内见 [docs/api.md](docs/api.md)）。原生 API 的类型及说明随包内 `.pyi` 提供。
 
-#### `init_lib(adb_path: str | None = None) -> tuple[str, str]`
+## 使用边界
 
-初始化库。会启动 ADB 守护进程等一系列准备工作。
+- 一个设备实例应在同一 asyncio 事件循环内使用。设备锁和解码器锁保护各自操作；并非所有公开方法共用一把锁，也不提供跨事件循环共享保证。
+- `connect()` 成功表示流和尺寸就绪，截图仍可能因为首帧未到而返回 `None`。
+- 控制方法返回不代表手机 UI 已执行动作；断连时不能保证手势抬起消息送达。
+- 设备用完后显式 `await disconnect()`，再 `await deinit_lib()`。停止全局 daemon 会影响其他 ADB 客户端。
+- 网络操作超时会开始取消与清理，实际返回可能稍晚。原生销毁等待硬件和队列完成，没有强制释放在用内存的超时。
+- 不提供固定截图吞吐保证、历史帧队列或视频录制 API。
 
-**参数：**
-- `adb_path`: ADB 可执行文件路径，如果为 None 则自动在系统PATH中找ADB
+## 开发文档
 
-**返回：**
-- `(adb_version, scrcpy_version)`: ADB 版本号和 scrcpy 版本号
+[架构](docs/architecture.md) · [控制流程与 BGRA8](docs/control-flow.md) · [Python 兼容性](docs/python-compatibility.md)
 
-**异常：**
-- `AdbScrPyInitException`: 初始化失败
+仓库开发文档与测试不进入 sdist/wheel。项目通过 setuptools 构建原生扩展；CMake 仅用于 IDE 索引。
 
-#### `deinit_lib() -> None`
+## 许可证与依赖
 
-反初始化库。会停止 ADB 守护进程并清理临时文件。
-
-**！作死警告！**
-- 千万不要在已经连接设备（调用了 `AndroidDevice.connect()` 方法）后调用这个函数，可能导致非常严重的后果！
-- 因为一些奇怪的通信协议和操作系统的机制，这么干轻则导致python进程挂死，必须强行结束。
-- 重则把手机内核搞崩掉导致需要强制重启。
-
-#### `list_devices() -> list[str]`
-
-获取当前连接的 ADB 设备列表。
-
-**返回：**
-- 设备列表，每个元素为设备地址或序列号，可以用于后续连接设备
-
-#### `set_screen_record_fps(fps: int) -> None`
-
-设置录屏帧率（10-60）。仅推荐无硬件解码器的平台进行设置，硬件解码的性能绰绰有余无需关注。
-
-### AndroidDevice 类
-
-#### 构造函数
-
-```python
-AndroidDevice(serial: str, connection_type: Literal["tcp", "usb"])
-```
-
-**参数：**
-- `serial`: 设备序列号或 IP:端口
-- `connection_type`: 连接类型，"tcp" 或 "usb"
-
-#### 方法
-
-| 方法 | 说明 |
-|------|------|
-| `connect() -> bool` | 连接设备 |
-| `disconnect() -> None` | 断开设备连接 |
-| `get_screen_size() -> tuple[int, int] \| None` | 获取屏幕尺寸 |
-| `get_screenshot_jpg(quality: int = 75) -> bytes \| None` | 获取屏幕截图。由于技术问题，这个接口不能高频调用（建议不超过 5fps）|
-| `click(x: int, y: int) -> None` | 单击屏幕 |
-| `double_click(x: int, y: int) -> None` | 双击屏幕 |
-| `long_press(x: int, y: int, duration_ms: int) -> None` | 长按屏幕 |
-| `swipe(x1: int, y1: int, x2: int, y2: int) -> None` | 滑动屏幕，从 (x1, y1) 滑动到 (x2, y2) |
-| `action_series(actions: list[GestureActionNode], check: bool = True) -> None` | 执行一系列手势操作（下方详见说明） |
-| `press_back() -> None` | 按返回键 |
-| `paste(text: str) -> None` | 粘贴文本 |
-| `launch_app(package_name: str, activity_name: str) -> bool` | 启动应用 |
-| `stop_app(package_name: str) -> bool` | 停止应用 |
-
-*\*`get_screenshot_jpg`方法需要访问解码器，但python无内建的高效率DispatchQueue，导致不得不用asyncio.Lock保护操作。如果高频调用会导致整个解码流程阻塞！*
-
-## 高级用法
-
-### 自定义 ADB 路径
-
-```python
-await init_lib(adb_path="/path/to/adb")
-```
-
-### 设置录屏帧率
-
-```python
-from adb_scr import set_screen_record_fps
-
-set_screen_record_fps(30)
-```
-
-### 应用管理
-
-```python
-# 启动应用
-await device.launch_app("com.example.app", ".MainActivity")
-
-# 停止应用
-await device.stop_app("com.example.app")
-```
-
-### 滑动操作
-
-```python
-# 从 (100, 500) 滑动到 (100, 200)，实现向上滑动
-await device.swipe(100, 500, 100, 200)
-```
-
-### 自定义手势序列
-
-使用 `action_series` 方法可以执行复杂的手势操作，用于模拟复杂的手指操作，比如玩游戏或者拖拽等。
-
-```python
-from adb_scr.device.types import GestureActionNode, GestureAction
-
-# 自定义手势序列
-actions = [
-    GestureActionNode(100, 500, GestureAction.DOWN, 10),   # 按下
-    GestureActionNode(100, 400, GestureAction.MOVE, 20),   # 移动
-    GestureActionNode(100, 300, GestureAction.MOVE, 20),   # 继续移动
-    GestureActionNode(100, 200, GestureAction.UP, 0),      # 抬起
-]
-await device.action_series(actions)
-```
-
-**参数说明：**
-
-1. **手势序列规则**：正常情况下，列表开头的操作必须是 `DOWN`，结尾的操作必须是 `UP`。方法默认会检查这个条件，不符合条件的会拒绝执行。
-
-2. **duration_ms 参数**：每个节点的 `duration_ms` 表示执行该操作后等待的时间（毫秒）。
-   - 每个节点（除了最后一个）的 `duration_ms` 不建议设为 0，否则操作间隔过短，手机可能无法响应
-   - 最后一个节点的 `duration_ms` 建议填 0，除非你确定需要等待一段时间
-   - `duration_ms` 必须在 0-10000 范围内（0-10秒）
-
-3. **跳过检查**：这是个非常危险的操作，如果你确定自己在做什么非得要越过常规的操作，可以将 `check` 参数设为 `False` 跳过检查：
-   ```python
-   await device.action_series(actions, check=False)
-   ```
-   ⚠️ **警告**：假如 `DOWN` 之后没有 `UP`，会导致手机认为一直有手指按在屏幕上，后续的所有操作都可能会错乱
-
-4. **坐标检查**：默认会检查坐标是否在屏幕范围内，超出范围的坐标会被拒绝执行。
-
-## 注意事项
-
-1. **并发安全**：`AndroidDevice` 的方法内部有锁保护，不会并行执行多个操作
-2. **屏幕尺寸获取**：刚连接时屏幕数据可能还未送达，建议等待几百毫秒后再获取
-3. **网络设备**：TCP 连接的设备需要确保手机和电脑在同一网络，且已开启 ADB 网络调试
-4. **资源清理**：设备使用完毕后必须调用 `disconnect()` 清理资源，否则会导致内存泄漏。建议（不强制但建议）在软件退出前调用 `deinit_lib()` 反初始化库，释放所有资源。
-
-## 技术实现
-
-- 使用 [scrcpy](https://github.com/Genymobile/scrcpy) 服务端进行屏幕镜像
-- C extension 使用 macOS 原生 ImageIO/CoreGraphics 框架实现高效的图像编码
-- 完全异步实现，基于 Python asyncio
-
-## 许可证
-
-MIT License
-
-## 致谢
-
-- [scrcpy](https://github.com/Genymobile/scrcpy) - 屏幕镜像核心
-- Apple ImageIO/CoreGraphics - 图像编码
-- Apple VideoToolbox - H.264 硬件解码
+MIT License。屏幕传输使用 [scrcpy](https://github.com/Genymobile/scrcpy)；解码、像素转换及 JPEG 编码使用 Apple VideoToolbox、Accelerate/vImage 和 ImageIO/CoreGraphics。

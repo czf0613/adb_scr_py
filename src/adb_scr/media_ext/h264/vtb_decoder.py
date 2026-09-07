@@ -1,14 +1,17 @@
-from .decoder_base import H264DecoderBase
-from adb_scr.exceptions import AdbScrPyH264DecoderException
+import asyncio
 from typing import TYPE_CHECKING, final
+
+from adb_scr.exceptions import AdbScrPyH264DecoderException
+from adb_scr.logger import logger
+
+from ...async_utils import complete_on_cancel
 from .._adb_scr_media import (
     create_decoder,
     destroy_decoder,
     enqueue_frame,
     get_current_frame_bgra8,
 )
-import asyncio
-from adb_scr.logger import logger
+from .decoder_base import H264DecoderBase
 
 __all__ = []
 
@@ -23,10 +26,16 @@ class VtbH264Decoder(H264DecoderBase):
         used: bool
 
     def __init__(self, sps_and_pps: bytes) -> None:
-        """
-        调用VideoToolbox的编码器初始化解码器
-        :param sps_and_pps: SPS和PPS参数，用于初始化解码器(0x00 0x00 0x00 0x01开头的ANNEXB格式)
-        :raises AdbScrPyH264DecoderException: 如果初始化失败，则抛出此异常
+        """根据 SPS/PPS 创建 VideoToolbox 硬件解码器。
+
+        Args:
+            sps_and_pps: Annex B 格式的 SPS 和 PPS 数据。
+
+        Raises:
+            AdbScrPyH264DecoderException: 参数解析或硬件解码器创建失败。
+
+        Notes:
+            构造包含系统调用，应通过 asyncio.to_thread() 从异步路径调用。
         """
         super().__init__()
         self.used = False
@@ -43,7 +52,7 @@ class VtbH264Decoder(H264DecoderBase):
             return
 
         self.valid = False
-        await asyncio.to_thread(destroy_decoder, self.handle)
+        await complete_on_cancel(asyncio.to_thread(destroy_decoder, self.handle))
 
     def enqueue_frame(self, is_idr: bool, nalu: bytes, pts: int) -> bool:
         if not self.valid:
@@ -66,4 +75,6 @@ class VtbH264Decoder(H264DecoderBase):
             logger.warning("解码器句柄已关闭，无法获取当前视频帧")
             return None
 
-        return await asyncio.to_thread(get_current_frame_bgra8, self.handle)
+        return await complete_on_cancel(
+            asyncio.to_thread(get_current_frame_bgra8, self.handle)
+        )

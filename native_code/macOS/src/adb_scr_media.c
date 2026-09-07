@@ -2,6 +2,22 @@
 #include "vtb_decoder.h"
 #include <Python.h>
 #include <stdlib.h>
+#include <pthread.h>
+
+typedef struct {
+  void *decoder;
+  pthread_mutex_t mutex;
+} decoder_handle_t;
+
+static void release_decoder_handle(PyObject *capsule) {
+  decoder_handle_t *handle =
+      PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  Py_BEGIN_ALLOW_THREADS
+  vtb_destroy_decoder(&handle->decoder);
+  pthread_mutex_destroy(&handle->mutex);
+  free(handle);
+  Py_END_ALLOW_THREADS
+}
 
 /**
  * @brief 将BGRA8格式的图像数据编码为JPEG格式
@@ -63,14 +79,26 @@ static PyObject *create_decoder(PyObject *self, PyObject *args) {
 
   void *decoder = NULL;
   int32_t width = 0, height = 0;
-  if (vtb_create_decoder((const uint8_t *)sps_and_pps_data,
-                         (size_t)sps_and_pps_size, &decoder, &width,
-                         &height) != 0) {
+  int32_t status;
+  Py_BEGIN_ALLOW_THREADS
+  status = vtb_create_decoder((const uint8_t *)sps_and_pps_data,
+                             (size_t)sps_and_pps_size, &decoder, &width, &height);
+  Py_END_ALLOW_THREADS
+  if (status != 0) {
     Py_RETURN_NONE;
   }
 
-  PyObject *capsule =
-      PyCapsule_New(decoder, "_adb_scr_media.DecoderHandle", NULL);
+  decoder_handle_t *handle = malloc(sizeof(decoder_handle_t));
+  handle->decoder = decoder;
+  if (pthread_mutex_init(&handle->mutex, NULL) != 0) {
+    Py_BEGIN_ALLOW_THREADS
+    vtb_destroy_decoder(&handle->decoder);
+    Py_END_ALLOW_THREADS
+    free(handle);
+    Py_RETURN_NONE;
+  }
+  PyObject *capsule = PyCapsule_New(
+      handle, "_adb_scr_media.DecoderHandle", release_decoder_handle);
 
   PyObject *result = PyTuple_New(3);
   PyTuple_SetItem(result, 0, PyLong_FromLong(width));
@@ -85,11 +113,16 @@ static PyObject *destroy_decoder(PyObject *self, PyObject *args) {
   PyObject *capsule;
   PyArg_ParseTuple(args, "O", &capsule);
 
-  void *decoder = PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
-  vtb_destroy_decoder(&decoder);
-  // 此时decoder指向NULL，capsule内部的值已经被破环
-  // 前文创建capsule的时候，析构函数给的就是NULL，所以这里恰好是不会crash的
-  // 无需额外处理
+  decoder_handle_t *handle =
+      PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  if (handle == NULL) {
+    return NULL;
+  }
+  Py_BEGIN_ALLOW_THREADS
+  pthread_mutex_lock(&handle->mutex);
+  vtb_destroy_decoder(&handle->decoder);
+  pthread_mutex_unlock(&handle->mutex);
+  Py_END_ALLOW_THREADS
 
   Py_RETURN_NONE;
 }
@@ -102,14 +135,24 @@ static PyObject *enqueue_frame(PyObject *self, PyObject *args) {
   int64_t pts;
   PyArg_ParseTuple(args, "OO!L", &capsule, &PyBytes_Type, &nalu_bytes, &pts);
 
-  void *decoder = PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  decoder_handle_t *handle =
+      PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  if (handle == NULL) {
+    return NULL;
+  }
 
   char *nalu_data = NULL;
   Py_ssize_t nalu_size = 0;
   PyBytes_AsStringAndSize((PyObject *)nalu_bytes, &nalu_data, &nalu_size);
 
-  if (vtb_enqueue_frame(decoder, (const uint8_t *)nalu_data, (size_t)nalu_size,
-                        pts)) {
+  bool success;
+  Py_BEGIN_ALLOW_THREADS
+  pthread_mutex_lock(&handle->mutex);
+  success = vtb_enqueue_frame(handle->decoder, (const uint8_t *)nalu_data,
+                              (size_t)nalu_size, pts);
+  pthread_mutex_unlock(&handle->mutex);
+  Py_END_ALLOW_THREADS
+  if (success) {
     Py_RETURN_TRUE;
   } else {
     Py_RETURN_FALSE;
@@ -122,11 +165,21 @@ static PyObject *get_current_frame_bgra8(PyObject *self, PyObject *args) {
   PyObject *capsule;
   PyArg_ParseTuple(args, "O", &capsule);
 
-  void *decoder = PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  decoder_handle_t *handle =
+      PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  if (handle == NULL) {
+    return NULL;
+  }
 
   uint8_t *frame_data = NULL;
   size_t width = 0, height = 0;
-  if (!vtb_current_frame_bgra8(decoder, &frame_data, &width, &height)) {
+  bool success;
+  Py_BEGIN_ALLOW_THREADS
+  pthread_mutex_lock(&handle->mutex);
+  success = vtb_current_frame_bgra8(handle->decoder, &frame_data, &width, &height);
+  pthread_mutex_unlock(&handle->mutex);
+  Py_END_ALLOW_THREADS
+  if (!success) {
     Py_RETURN_NONE;
   }
 
