@@ -480,19 +480,22 @@ class AndroidDevice:
     async def action_series(
         self, actions: list[GestureActionNode], check: bool = True
     ) -> None:
-        """按顺序发送单指手势节点。
+        """按顺序发送单指或多指手势节点。
 
         Args:
-            actions: 节点列表；每个节点发送后按 duration_ms 加入随机等待，
-                最后一个节点也适用。空列表不执行操作。
-            check: 默认 True，检查节点数量、持续时间和相邻动作转换。
-                False 跳过这些检查，但仍检查全部坐标。
+            actions: 节点列表，以 pointer_id 区分手指。每个节点发送后按
+                duration_ms 加入随机等待，最后一个节点也适用。空列表不执行操作。
+            check: 默认 True，检查节点数量、持续时间、每根手指的状态和配对，
+                同时按下的手指最多 10 根。False 跳过这些检查，但仍检查全部
+                坐标和 pointer_id 的类型及范围。
 
         Notes:
-            调用方应以 DOWN 开始、UP 结束。当前实现检查相邻状态转换，
-            但没有额外验证最终状态必须为 UP。check=True 时持续时间范围
-            为 0 到 10000 毫秒；等待含随机扰动，不是精确的计时接口。
-            检查失败时记录日志并返回；返回值不表示动作执行确认。
+            check=True 时，每个 ID 必须先 DOWN，按下后才允许 MOVE 或 UP；
+            已按下的 ID 不能重复 DOWN，UP 后可以再次 DOWN。不同 ID 的动作
+            可以交错，结束时必须全部抬起，支持连续多组手势。
+            持续时间范围为 0 到 10000 毫秒；等待含随机扰动，不是精确的计时接口。
+            发送前完整检查列表，失败时记录日志并返回，不发送任何节点。
+            返回值不表示动作执行确认；断连或取消仍可能中断已开始的手势。
         """
         if len(actions) == 0:
             return
@@ -501,6 +504,13 @@ class AndroidDevice:
             # 检查有没有坐标越界
             if not self._check_in_screen(action.x, action.y):
                 logger.error(f"坐标({action.x},{action.y})不在屏幕内，拒绝执行")
+                return
+            if (
+                not isinstance(action.pointer_id, int)
+                or isinstance(action.pointer_id, bool)
+                or not 0 <= action.pointer_id <= (1 << 63) - 1
+            ):
+                logger.error("pointer_id必须是0到2**63-1的整数，拒绝执行")
                 return
 
         if check:
@@ -514,28 +524,34 @@ class AndroidDevice:
                     logger.error("节点的duration_ms异常，拒绝执行")
                     return
 
-            # 跑一下状态机检测一下手指的状态有没有不合理的
-            state = GestureAction.UP
+            # 按 ID 跟踪仍按下的手指，允许不同手指的动作交错。
+            active_pointers: set[int] = set()
             for node in actions:
                 match node.action:
                     case GestureAction.DOWN:
-                        if state != GestureAction.UP:
-                            logger.error("DOWN操作准备条件异常，拒绝执行")
+                        if node.pointer_id in active_pointers:
+                            logger.error(f"手指{node.pointer_id}已按下，不能重复DOWN，拒绝执行")
                             return
-                        state = GestureAction.DOWN
+                        # scrcpy 3.2 的 PointersState.MAX_POINTERS 为 10。
+                        if len(active_pointers) >= 10:
+                            logger.error("同时按下的手指不能超过10根，拒绝执行")
+                            return
+                        active_pointers.add(node.pointer_id)
                     case GestureAction.MOVE:
-                        if state == GestureAction.UP:
-                            logger.error("MOVE操作不能在UP状态下执行，拒绝执行")
+                        if node.pointer_id not in active_pointers:
+                            logger.error(f"手指{node.pointer_id}未按下，不能MOVE，拒绝执行")
                             return
-                        state = GestureAction.MOVE
                     case GestureAction.UP:
-                        if state == GestureAction.UP:
-                            logger.error("UP操作不能在UP状态下执行，拒绝执行")
+                        if node.pointer_id not in active_pointers:
+                            logger.error(f"手指{node.pointer_id}未按下，不能UP，拒绝执行")
                             return
-                        state = GestureAction.UP
+                        active_pointers.remove(node.pointer_id)
                     case _:
                         logger.error(f"未知的手势操作{node.action}，拒绝执行")
                         return
+            if active_pointers:
+                logger.error(f"手势结束时仍有未抬起的手指{sorted(active_pointers)}，拒绝执行")
+                return
 
         async with self._mutex:
             if self.control_handle is None:
@@ -545,7 +561,7 @@ class AndroidDevice:
             # 发送事件
             for node in actions:
                 if not await self.control_handle.send_gesture_event(
-                    node.x, node.y, node.action.value
+                    node.x, node.y, node.action.value, node.pointer_id
                 ):
                     return
 

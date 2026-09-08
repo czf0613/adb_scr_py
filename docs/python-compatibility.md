@@ -6,6 +6,33 @@
 
 Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖或使用较新语法/标准库 API 时，要在真实 3.10 解释器下验证；仅在 3.14 上通过测试不能证明最低版本可用。
 
+## 2026-09-08 手势配对与多指验证
+
+`GestureActionNode` 新增末尾参数 `pointer_id=0`，原有四个位置参数仍可使用。
+`action_series(check=True)` 现在按 ID 校验 DOWN/MOVE/UP，并在结束时要求所有
+手指抬起；不同 ID 可以交错操作，同一 ID 抬起后可以复用。控制消息传递实际 ID，
+单指 click/long_press/swipe 统一使用默认 ID 0。详细约定见 [API 手势说明](api.md)。
+
+Python 3.10.20、普通 3.14.6、3.14.6t 各通过 78 项相关无设备测试，覆盖
+`test_action_series.py`（62 项）、`test_device_session.py` 和 `test_lifecycle.py`。
+新增用例通过真实手势校验与控制消息编码、录制写出的协议字节，覆盖四指连续按下、
+乱序抬起、交错 MOVE、ID 复用、缺少最终 UP、错误配对、未按下/已抬起后的 MOVE、
+并发触点上限、非法 ID、整份列表拒绝、check=False 和原有单指调用。
+修复前已复现不完整手势仍发送事件的问题，再实现校验与多指编码。
+
+3.10 和 3.14t 均在独立源树构建 sdist/wheel，并从安装后的 site-packages 测试；
+3.14t 未强制关闭 GIL，导入及测试后均确认 GIL 保持关闭。归档中的代码、资源、
+扩展和类型信息已核对，docs/、tests/、AGENTS.md 保持排除。正常环境仍使用 3.14。
+三个版本均编译 27 个 Python/存根文件、导入 16 个模块、编译 10 段 README/API
+示例；`test_run.py` 只收集 1 项，未执行。新增测试与限定范围的 Ruff 检查通过。
+没有连接手机，多指在具体 Android 设备和应用中的注入效果仍需真机验证。
+
+```bash
+uv run --python 3.14 --locked setup.py build_ext --inplace
+uv run --python 3.14 --locked pytest tests/test_action_series.py tests/test_device_session.py tests/test_lifecycle.py -q
+uv run --python 3.14 --locked pytest tests/test_run.py --collect-only -q
+```
+
 ## Free-threaded CPython
 
 扩展在 free-threaded 构建下声明 `Py_MOD_GIL_NOT_USED`，已验证 **CPython 3.14t**。

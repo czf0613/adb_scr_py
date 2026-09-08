@@ -2,7 +2,7 @@
 
 通过 ADB 和 scrcpy 控制 Android 设备，并使用 macOS VideoToolbox 解码屏幕视频。Python 导入名为 `adb_scr`。
 
-支持 USB 和网络调试连接、点击/滑动/长按/粘贴、应用启动与停止，以及按需 JPEG 截图。内部保留 BGRA8 原始帧通路，供 NumPy/OpenCV 消费；JPEG 是附加输出，不是原始帧的替代品。
+支持 USB 和网络调试连接、点击/滑动/长按/粘贴、单指及多指手势、应用启动与停止，以及按需 JPEG 截图。内部保留 BGRA8 原始帧通路，供 NumPy/OpenCV 消费；JPEG 是附加输出，不是原始帧的替代品。
 
 ## 安装
 
@@ -97,7 +97,7 @@ EOF、接收/发送失败、服务端进程退出或设备存活探测连续失�
 | `set_screen_record_fps(fps)` | 设置后续会话的帧率上限 |
 | `ConnectionOptions(...)` | 配置连接、I/O、关闭及存活探测 |
 | `AndroidDevice(...)` | 设备会话、截图及控制 API |
-| `GestureAction` / `GestureActionNode` | 单指手势序列 |
+| `GestureAction` / `GestureActionNode` | 通过 `pointer_id` 区分手指的单指/多指手势序列 |
 | `await deinit_lib()` | 所有设备关闭后停止共享 daemon |
 
 完整签名、参数单位、失败行为和示例见 [API 参考](https://github.com/czf0613/adb_scr_py/blob/master/docs/api.md)（仓库内见 [docs/api.md](docs/api.md)）。原生 API 的类型及说明随包内 `.pyi` 提供。

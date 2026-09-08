@@ -80,6 +80,14 @@ FPS 是下一次启动服务端使用的进程级上限，不影响已运行会�
 
 监控同时等待控制句柄结束、scrcpy 子进程退出和可选的存活探测结果。探测默认每次完成后等待 5 秒，再执行有 5 秒超时的 `adb -s SERIAL shell true`，连续 3 次失败关闭；成功归零。它验证 transport/shell，不证明视频编码器仍在产帧。`probe_interval=None` 禁用主动探测。
 
+## 手势状态与多指触控
+
+`GestureActionNode.pointer_id` 默认 0，位于原有四个字段之后；同一根手指在 DOWN/MOVE/UP 间保持 ID。控制消息将该 ID 编码为 8 字节大端整数，替代旧的固定指针值；click、long_press、swipe 也统一使用默认 ID 0。scrcpy 3.2 根据活跃指针集合转换多指 DOWN/UP 的 Android 动作及索引，客户端仍发送基本 DOWN/MOVE/UP。协议依据见 [Controller.injectTouch](https://github.com/Genymobile/scrcpy/blob/v3.2/server/src/main/java/com/genymobile/scrcpy/control/Controller.java) 和 [PointersState](https://github.com/Genymobile/scrcpy/blob/v3.2/server/src/main/java/com/genymobile/scrcpy/control/PointersState.java)。
+
+`action_series(check=True)` 在发送之前完整检查列表，按 ID 维护已按下的手指集合。DOWN 只能加入未按下的 ID；MOVE/UP 必须对应已按下的 ID，UP 将其移出；结束时集合必须为空。同一 ID 抬起后可以复用，不同 ID 可以交错操作，最多同时按下 10 根手指。单看 DOWN/UP 总数无法识别错误的手指配对。所有模式均预先检查坐标和 ID 的整数范围（0 到 `2**63 - 1`）；check=False 只跳过数量、时长和状态校验。
+
+校验失败记录日志并返回，不发送任何节点。校验成功后仍在设备锁内逐个发送及等待；节点顺序和每个节点后的随机间隔保持原有语义。该校验仅针对本次列表，不追踪跨调用触点，也不保证断连/取消后最终 UP 的送达。
+
 ## 关闭与取消
 
 控制句柄只创建一个清理任务，首次原因获保留。停止信号立即令 `running=False` 并唤醒手势等待。清理取消并等待接收任务、关闭两条流，在解码器锁内关闭解码器并清零尺寸。关闭流等待超时后 abort transport。

@@ -123,7 +123,7 @@ jpeg = await device.get_screenshot_jpg(
 | `swipe(x1: int, y1: int, x2: int, y2: int) -> None` | 通过插值节点滑动到目标像素坐标 |
 | `press_back() -> None` | 发送返回键按下与抬起 |
 | `paste(text: str) -> None` | 发送 UTF-8 文本；设备焦点应位于目标输入框 |
-| `action_series(actions: list[GestureActionNode], check: bool = True) -> None` | 按顺序发送手势节点 |
+| `action_series(actions: list[GestureActionNode], check: bool = True) -> None` | 按顺序发送单指或多指手势节点 |
 
 无连接、坐标不合法或手势检查失败时，控制方法记录日志并返回。`None` 不表示手机已经处理了动作；`drain()` 只处理本地发送背压。断连后无法保证最后的抬起消息到达，调用方不应依赖断连后的后续动作。方法内的锁保护指定操作序列；整个 `double_click()` 等组合调用并非全部持有同一把锁。
 
@@ -136,7 +136,9 @@ from adb_scr import GestureAction, GestureActionNode
 node = GestureActionNode(x=100, y=200, action=GestureAction.DOWN, duration_ms=50)
 ```
 
-`GestureActionNode` 是数据类：`x: int`、`y: int`、`action: GestureAction`、`duration_ms: int = 50`。持续时间表示该节点发送后的等待，最后一个节点也适用；执行时包含随机扰动，不是精确计时。
+`GestureActionNode` 是数据类：`x: int`、`y: int`、`action: GestureAction`、`duration_ms: int = 50`、`pointer_id: int = 0`。新增的 pointer_id 位于参数末尾，原有四个位置参数仍可使用；默认 ID 0 表示单指。同一根手指的 DOWN/MOVE/UP 使用同一 ID，不同手指使用不同 ID。ID 必须是 0 到 `2**63 - 1` 的整数，不接受 bool；负值保留给 scrcpy 的特殊指针类型。
+
+持续时间表示该节点发送后的等待，最后一个节点也适用；执行时包含随机扰动，不是精确计时。以下是单指示例：
 
 ```python
 await device.action_series([
@@ -146,7 +148,29 @@ await device.action_series([
 ])
 ```
 
-调用方应以 DOWN 开始、UP 结束。当前 `check=True` 检查至少两个节点、持续时间 0–10000 毫秒以及相邻状态转换，**并没有额外验证最终状态必须是 UP**。`check=False` 跳过这些检查，但仍检查坐标。此文档整理没有修改这项既有手势行为。
+`check=True` 在发送第一个节点之前校验整份列表：
+
+- 非空列表至少两个节点，持续时间为 0–10000 毫秒，动作必须是 DOWN/MOVE/UP。
+- 每个 ID 的 DOWN/UP 必须一一配对；未按下不能 MOVE 或 UP，已按下不能再次对同一 ID 发 DOWN。
+- 不同 ID 可以连续 DOWN，也可以交错 MOVE、UP。全部事件结束时所有手指必须抬起，最后一个动作必须是 UP。
+- 同一 ID 抬起后可以再次使用，一份列表可以包含多组单指或多指手势。最多同时按下 10 根手指，与所用 scrcpy 3.2 的上限一致；累计使用的 ID 数量不受此上限限制。
+
+校验失败会记录日志并返回 None，整份列表不会发送任何节点。DOWN/UP 总数相同但 ID 不匹配也会被拒绝；不会自动补发 UP 来修正输入。空列表保持无操作。`check=False` 跳过数量、时长及手指状态校验，但仍完整检查坐标与 pointer_id 的类型和范围。
+
+例如，以下两根手指可以同时按下、分别移动，再按任意顺序抬起：
+
+```python
+await device.action_series([
+    GestureActionNode(100, 400, GestureAction.DOWN, pointer_id=0),
+    GestureActionNode(300, 400, GestureAction.DOWN, pointer_id=1),
+    GestureActionNode(80, 400, GestureAction.MOVE, pointer_id=0),
+    GestureActionNode(320, 400, GestureAction.MOVE, pointer_id=1),
+    GestureActionNode(80, 400, GestureAction.UP, pointer_id=0),
+    GestureActionNode(320, 400, GestureAction.UP, pointer_id=1),
+])
+```
+
+节点仍按列表顺序发送；“多指”表示多个触点可同时保持按下，不是同时提交整批坐标。状态校验针对当前列表，断连或取消仍可能中断已开始的手势，不能保证手机收到最终 UP。
 
 ## 原生 API 与异常
 

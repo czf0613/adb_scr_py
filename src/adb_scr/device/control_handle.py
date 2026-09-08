@@ -289,19 +289,23 @@ class DeviceControlHandle:
             self._stop(f"控制发送失败：{e!r}")
             return False
 
-    async def send_gesture_event(self, x: int, y: int, action: int) -> bool:
+    async def send_gesture_event(
+        self, x: int, y: int, action: int, pointer_id: int = 0
+    ) -> bool:
         """发送手势事件到设备（这个方法太常用了，所以单独拎出来）
 
         Args:
             x: 事件坐标x
             y: 事件坐标y
             action: 事件动作，取值来自于GestureAction的枚举值
+            pointer_id: 手指标识，0 到 2**63 - 1 的整数，默认 0。
+                同一根手指的 DOWN/MOVE/UP 必须使用相同 ID。
 
         Returns:
             如果发送成功，则返回True；否则返回False
         """
-        # 组装字节数组，前面的东西是固定的
-        data = bytes([0x02, action, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD])
+        # scrcpy 按 8 字节大端 pointer ID 区分手指，并转换多指 DOWN/UP。
+        data = bytes([0x02, action]) + pointer_id.to_bytes(8, byteorder="big")
         data += to_u32_be(x)
         data += to_u32_be(y)
         data += to_u16_be(self.screen_width)
