@@ -137,7 +137,7 @@ BGRA8 取帧通过 `dispatch_sync(queue, ...)` 进入同一队列：若当前帧
 ### 队列之外的生命周期仍要管理
 
 - Python 的 `DeviceControlHandle._mutex` 仍负责协调解码器替换、入队、读取和销毁；GCD 对最新帧的串行访问不能替代句柄生命周期保护。
-- 创建、取帧和销毁通过 `asyncio.to_thread()` 调度。原生句柄操作（含 JPEG 直出）沿用释放 GIL 和容器互斥锁协议；旧 BGRA8 → JPEG 包装的 GIL 行为保持不变。取消协程时必须等待在途线程及资源安装完成，不能假定线程已终止。
+- 创建、取帧和销毁通过 `asyncio.to_thread()` 调度。原生句柄操作（含 JPEG 直出）先分离 Python 线程状态，再等待容器互斥锁；BGRA8 → JPEG 包装也在编码时分离线程状态。普通 CPython 下同时释放 GIL，free-threaded 下保留这一边界让 GC 能继续协调。取消协程时必须等待在途线程及资源安装完成，不能假定线程已终止。
 - 当前销毁先等待 VideoToolbox 回调结束，再同步进入 GCD 队列释放最终帧，最后释放队列与结构体。旧实现漏等 GCD 任务，存在 use-after-free 风险；不得移除这一完成等待。Capsule 持有稳定容器，关闭清空容器指针，重复关闭和关闭后调用安全失败。
 
 ## NV12 快速转换为 BGRA8
@@ -183,7 +183,7 @@ def frame_to_bgra_array(frame: tuple[int, int, bytes]) -> np.ndarray:
 
 Core Image 能从 CVPixelBuffer 读取 YUV，在 Metal 可用时使用 Metal 上下文；没有 Metal 设备时使用软件上下文。该路径并不保证 JPEG 压缩全程由 GPU 完成。输出使用 sRGB，系统读取输入色彩信息；不要求不同编码器在相同质量参数下输出相同画质。公开参数和错误约定见 [API 参考](api.md#尺寸与截图)。
 
-JPEG 编码器属于 Capsule，由原生句柄锁保护，关闭时完成编码并释放 session、CIContext 和色彩空间。JPEG bytes 已复制出来，因此解码器随后销毁不影响调用方保存的图片。本次没有对旧接口进行统一 GIL 治理。
+JPEG 编码器属于 Capsule，由原生句柄锁保护，关闭时完成编码并释放 session、CIContext 和色彩空间。JPEG bytes 已复制出来，因此解码器随后销毁不影响调用方保存的图片。扩展支持 free-threaded CPython；同一句柄仍串行，不同句柄可并行。Python 设备对象继续在同一 asyncio 事件循环内使用，不能将 asyncio 锁视为跨线程锁。
 
 ## 后续 Agent 应保留的设计约束
 

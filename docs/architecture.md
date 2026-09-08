@@ -108,7 +108,9 @@ JPEG 直出在 GCD 队列内取得 retain 的帧快照，随后在队列外编�
 
 销毁顺序为：阻止同一句柄新操作 → 等待 VideoToolbox 异步回调 → invalidate/release session → 同步进入 GCD 队列，确认旧任务结束并释放最终帧 → 释放队列与 decoder → 清空容器指针。等待 VideoToolbox 不等于等待回调另行提交的 GCD block，必须保留后者的同步步骤。
 
-创建、取帧、销毁从异步调用路径进入 `to_thread()`。原生句柄操作（含 JPEG 直出）沿用释放 GIL 和容器互斥锁协议；快速入队在正常控制句柄路径不与取帧/关闭竞争。旧 `bgra8_to_jpg()` 的 GIL 行为不变，其 C 包装没有专门释放 GIL；本次没有统一调整 GIL 策略。JPEG 会话销毁前等待编码完成，CIContext 和色彩空间随 Capsule 关闭释放。扩展未声明 free-threaded 支持。
+创建、取帧、销毁从异步调用路径进入 `to_thread()`。原生句柄操作（含 JPEG 直出）先分离 Python 线程状态，再进入容器互斥锁；快速入队在正常控制句柄路径不与取帧/关闭竞争。`bgra8_to_jpg()` 也在原生编码期间分离线程状态。普通 CPython 下这会释放 GIL；free-threaded 构建下仍须保留，以便垃圾回收等需要全局协调的操作继续进行。JPEG 会话销毁前等待编码完成，CIContext 和色彩空间随 Capsule 关闭释放。
+
+单阶段模块初始化在 `Py_GIL_DISABLED` 构建下声明 `Py_MOD_GIL_NOT_USED`，导入不会自动启用 GIL；普通 3.10/3.14 构建不引用该专用 API。分离期间不调用 Python 对象 API，参数解析和结果构造均在附着线程状态下进行。调用参数持有不可变 bytes、ROI tuple 和 Capsule 的引用；Capsule 的 pointer/name/destructor 创建后不再修改，关闭只改变容器内受锁保护的字段。最后一个引用释放时才执行 Capsule 析构，因此活跃调用不会与容器本身的释放重叠。
 
 ## 并发边界
 
@@ -120,10 +122,10 @@ JPEG 直出在 GCD 队列内取得 retain 的帧快照，随后在队列外编�
 | Capsule 容器原生锁 | 同一原生 decoder 的操作、JPEG 编码器复用与销毁 |
 | 每解码器 GCD 串行队列 | 当前 CVPixelBuffer 的替换、BGRA8 转换、JPEG 快照 retain 及最终释放 |
 
-asyncio 锁不提供跨事件循环保证。多设备拥有独立会话、队列和解码器；ADB daemon 和模块配置仍在进程内共享。
+asyncio 锁只协调同一事件循环中的协程，不是操作系统线程锁。设备实例、初始化/反初始化和模块配置仍应由同一事件循环管理；free-threaded 支持不允许跨事件循环共享这些状态。原生工作线程依赖 Capsule mutex 和 GCD 队列实现同步，同一句柄串行，不同句柄及独立 BGRA8 → JPEG 调用可并行。进程内共享的 vImage 转换参数和 BGRA8 编码色彩空间经 `dispatch_once` 初始化后只读；其余编码状态按调用或句柄隔离。ADB daemon 仍在进程内共享。
 
 ## 构建与验证
 
-原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
+原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI；普通 3.14 的 `cp314` 与 free-threaded 3.14 的 `cp314t` ABI 需要分别构建，不能混用。本地默认环境仍为普通 3.14；3.10 和 3.14t 在独立临时环境验证，命令见 [Python 兼容性](python-compatibility.md)。本次不新增子解释器支持。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
 
-无设备测试覆盖 EOF/半包/握手超时、部分连接失败、取消、进程退出、显式重连、探测阈值、手势中断、管道排空、原生重复关闭、GCD 排队工作完成及合成 H.264 → BGRA8 → JPEG。真机 `tests/test_run.py` 仅在明确请求时执行，默认兼容性核查只编译或收集它。
+无设备测试覆盖 EOF/半包/握手超时、部分连接失败、取消、进程退出、显式重连、探测阈值、手势中断、管道排空、原生重复关闭、GCD 排队工作完成及合成 H.264 → BGRA8 → JPEG。free-threaded 验证检查导入和测试结束时 GIL 仍关闭，并覆盖编码线程状态、多线程共享不可变输入、同一句柄读写/关闭、独立解码器及 GC 下的 Capsule 析构。真机 `tests/test_run.py` 仅在明确请求时执行，默认兼容性核查只编译或收集它。

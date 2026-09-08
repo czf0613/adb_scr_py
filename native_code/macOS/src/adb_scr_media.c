@@ -58,8 +58,13 @@ static PyObject *bgra8_to_jpg(PyObject *self, PyObject *args) {
   // 分配JPEG缓冲区
   uint32_t jpg_size = expected_size + 1024;
   uint8_t *jpg_buffer = (uint8_t *)malloc(jpg_size);
-  if (encode_bgra8_to_jpg(width, height, (const uint8_t *)bgra8_data, quality,
-                          &jpg_size, jpg_buffer)) {
+  bool success;
+  // args keeps the immutable input bytes alive while the thread is detached.
+  Py_BEGIN_ALLOW_THREADS
+  success = encode_bgra8_to_jpg(width, height, (const uint8_t *)bgra8_data, quality,
+                                &jpg_size, jpg_buffer);
+  Py_END_ALLOW_THREADS
+  if (success) {
     PyObject *result =
         PyBytes_FromStringAndSize((const char *)jpg_buffer, jpg_size);
     free(jpg_buffer);
@@ -327,5 +332,12 @@ static struct PyModuleDef adb_scr_media_module = {PyModuleDef_HEAD_INIT,
                                                   NULL};
 
 PyMODINIT_FUNC PyInit__adb_scr_media(void) {
-  return PyModule_Create(&adb_scr_media_module);
+  PyObject *module = PyModule_Create(&adb_scr_media_module);
+  if (module == NULL) {
+    return NULL;
+  }
+#ifdef Py_GIL_DISABLED
+  PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);
+#endif
+  return module;
 }

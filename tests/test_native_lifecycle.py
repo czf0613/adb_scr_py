@@ -1,6 +1,7 @@
 """Synthetic media only; native failures are isolated in a subprocess."""
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
@@ -71,6 +72,25 @@ for _ in range(20):
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_independent_handles_shared_bytes_and_gc(h264):
+    env = os.environ.copy()
+    env.pop("PYTHON_GIL", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-Werror::RuntimeWarning",
+            str(Path(__file__).with_name("native_thread_stress.py")),
+            str(h264),
+        ],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_cancelled_frame_read_waits_for_native_worker(monkeypatch):

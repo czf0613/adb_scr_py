@@ -1,8 +1,10 @@
 """macOS 原生媒体 API。
 
 调用方必须传入符合注解及参数约束的值；此存根不提供运行时类型校验。
-句柄操作以原生互斥锁串行化，关闭后读取和入队安全失败。扩展不声明
-free-threaded Python 支持。异步调用方应将创建、读取、销毁放到工作线程。
+同一句柄的操作以原生互斥锁串行化，关闭后读取和入队安全失败。
+扩展支持 free-threaded CPython，已验证 3.14t；需安装对应 ABI 的构建。
+原生耗时操作会分离 Python 线程状态，在普通 CPython 下释放 GIL。
+异步调用方仍须使用工作线程；此能力不扩展 Python 设备对象的事件循环边界。
 """
 
 from typing import final
@@ -30,6 +32,7 @@ def bgra8_to_jpg(width: int, height: int, bgra8: bytes, quality: int) -> bytes |
 
     Notes:
         不应依赖越界 quality 的转换行为。异步调用方应使用工作线程。
+        编码期间分离 Python 线程状态；输入 bytes 保持存活，返回独立 bytes。
     """
 
 def create_decoder(sps_and_pps: bytes) -> tuple[int, int, DecoderHandle] | None:

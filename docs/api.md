@@ -152,8 +152,8 @@ await device.action_series([
 
 `adb_scr.media_ext._adb_scr_media` 属于底层接口。完整类型与参数约束见 [`_adb_scr_media.pyi`](../src/adb_scr/media_ext/_adb_scr_media.pyi)。输入须符合存根约定；类型注解不代替运行时验证。
 
-原生句柄通过容器和互斥锁协调入队、读取及销毁；重复关闭安全，关闭后读取返回 None，入队返回 False。返回的 BGRA8 bytes 不引用 CVPixelBuffer。仍应显式关闭句柄，Capsule 析构仅作兜底。扩展没有声明 free-threaded Python 支持。
+原生句柄通过容器和互斥锁协调入队、读取及销毁；重复关闭安全，关闭后读取返回 None，入队返回 False。返回的 BGRA8 bytes 不引用 CVPixelBuffer。仍应显式关闭句柄，Capsule 析构仅作兜底。扩展支持 free-threaded CPython，已验证 3.14t；需要安装对应 ABI 的构建。同一句柄的原生操作串行，不同句柄及独立 BGRA8 → JPEG 编码可并行。
 
-创建、取帧和销毁须从异步路径调度到工作线程。取消协程不停止在途原生操作；库会等待相应操作完成，避免释放仍被工作线程使用的资源。VideoToolbox/GCD 销毁没有强制超时。
+创建、取帧、JPEG 编码和销毁须从异步路径调度到工作线程。原生耗时操作分离 Python 线程状态，在普通 CPython 下释放 GIL；这不会让同步函数变为异步函数。Python 设备对象、库初始化/反初始化及模块配置仍在同一事件循环内管理，asyncio 锁不提供跨线程保证。取消协程不停止在途原生操作；库会等待相应操作完成，避免释放仍被工作线程使用的资源。VideoToolbox/GCD 销毁没有强制超时。
 
 公开异常位于 `adb_scr.exceptions`：`AdbScrPyException`、`AdbScrPyInitException`、`AdbScrPyH264DecoderException`。设备 `connect()` 将普通连接异常转换成 False，`asyncio.CancelledError` 在清理后传播。

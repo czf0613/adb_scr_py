@@ -6,7 +6,7 @@
 
 ## 安装
 
-- Python 3.10 或更高版本；本地开发使用 3.14。
+- Python 3.10 或更高版本；本地开发使用普通 3.14。支持 free-threaded CPython，已验证 3.14t；需要对应 ABI 的构建，详见 [Python 兼容性](docs/python-compatibility.md)。
 - macOS，使用 VideoToolbox 硬件解码器。源码支持构建 arm64/x86_64，具体 wheel 可用性以发布文件为准。
 - 已安装 ADB，设备已授权 USB 调试，或已具备 ADB 网络调试条件。
 

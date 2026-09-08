@@ -32,6 +32,7 @@ We use `uv` to manage this project. Always use `uv` commands for project operati
 - New Python code, tests, and `.pyi` stubs must remain compatible with 3.10. Do not introduce newer-only syntax or standard-library APIs without a compatible fallback.
 - Validate compatibility with a real Python 3.10 interpreter in a separate temporary source tree/environment. Do not replace the normal 3.14 `.venv` just to perform this check.
 - A successful 3.14 run alone does not establish 3.10 compatibility. Check imports, native extension builds, and relevant device-free tests on both versions.
+- The native extension supports free-threaded CPython (verified on 3.14t). Native concurrency changes also require a separate 3.14t build and device-free tests with the GIL confirmed disabled before imports and after tests. Do not force `PYTHON_GIL=0` or `-X gil=0`, which can hide a missing module declaration. Keep the normal `.venv` on 3.14; see `docs/python-compatibility.md` for the separate wheel ABI and commands.
 
 ## Building
 

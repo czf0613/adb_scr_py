@@ -6,6 +6,104 @@
 
 Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖或使用较新语法/标准库 API 时，要在真实 3.10 解释器下验证；仅在 3.14 上通过测试不能证明最低版本可用。
 
+## Free-threaded CPython
+
+扩展在 free-threaded 构建下声明 `Py_MOD_GIL_NOT_USED`，已验证 **CPython 3.14t**。
+普通 CPython 继续支持 3.10 及以上；本地默认环境仍为普通 3.14。
+free-threaded 支持需要独立构建，普通 3.14 wheel 的 `cp314-cp314` 标签和
+3.14t wheel 的 `cp314-cp314t` 标签不能混用。现有 setuptools 配置会使用
+目标解释器的头文件和 ABI，无需手工定义 `Py_GIL_DISABLED` 或修改 CMake。
+
+`Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` 在两类构建中都必须保留：
+普通构建释放 GIL，free-threaded 构建分离线程状态，使 GC 等全局协调不被
+原生等待阻塞。该范围内只执行原生代码，Python 参数解析及返回值构造在范围外。
+`bgra8_to_jpg()` 的编码现在也遵循这一规则。同一句柄仍由原生互斥锁串行化；
+Python 设备对象和库初始化/配置继续在同一 asyncio 事件循环中管理。
+本次不新增子解释器支持。
+
+实现依据：[CPython 3.14 扩展适配指南](https://docs.python.org/3.14/howto/free-threading-extensions.html)、
+[free-threaded 运行状态检查](https://docs.python.org/3.14/howto/free-threading-python.html)。
+
+### 2026-09-08 验证结果
+
+在本机 macOS arm64 上，普通 3.14.6 原地构建；3.10.20 和 3.14.6t 在独立
+临时源树构建 sdist，再从 sdist 构建并安装各自 wheel。
+
+| 验证 | 3.10.20 | 3.14.6 | 3.14.6t |
+| --- | --- | --- | --- |
+| 六个相关无设备测试文件 | 62 passed，1 skipped | 62 passed，1 skipped | 63 passed |
+| 编码时分离线程状态、返回时恢复 | 通过 | 通过 | 通过 |
+| 4 工作线程 + GC 并发压力 | 通过 | 通过 | 通过 |
+| 导入和测试结束时 GIL 保持关闭 | 不适用 | 不适用 | 通过，无强制关闭参数 |
+| 26 个源码/测试/存根编译，16 个模块导入 | 通过 | 通过 | 通过 |
+| README/API 的 9 段 Python 示例编译 | 通过 | 通过 | 通过 |
+| test_run.py 只收集、不执行 | 1 collected | 1 collected | 1 collected |
+
+3.10 和 3.14t 的 sdist/wheel 已检查实际内容：原生源码、头文件、资源、扩展及
+类型信息完整，排除 docs/、tests/、AGENTS.md；3.14t wheel 的扩展文件带
+`cpython-314t` 标识。两个独立环境均从已安装 wheel 的 site-packages 导入。
+新增 Python 测试通过 Ruff 检查，已有改动文件通过限定 E4/E7/E9/F 检查。
+
+普通构建仅跳过“导入后保持 GIL 关闭”这一专属用例；硬件 JPEG 与模拟硬件
+不可用的回退用例在三个环境均实际通过。新增线程状态探针通过 `setup.py`
+构建测试专用扩展，在真实 C 包装进入真实编码器的边界检查线程状态，无计时阈值。
+并发子进程共享不可变输入，执行 160 次 BGRA8 → JPEG 编码、48 次独立解码器
+生命周期，覆盖原始帧、JPEG/ROI、重复关闭、Capsule 析构与 GC 并发；已有测试
+另覆盖同一句柄读取、入队和关闭竞争。
+
+两项关键回归测试先在修改前失败：3.14t 导入触发自动启用 GIL 的 RuntimeWarning，
+BGRA8 编码入口仍附着 Python 线程状态。修改后均通过。
+没有运行 ADB 真机操作、其他 Mac 型号或长期性能基准；测试不构成吞吐提升承诺。
+
+普通开发环境验证命令：
+
+```bash
+uv run --python 3.14 --locked setup.py build_ext --inplace
+uv run --python 3.14 --locked pytest tests/test_free_threading.py tests/test_native_lifecycle.py tests/test_jpg_direct.py tests/test_jpg.py tests/test_lifecycle.py tests/test_device_session.py -q
+uv run --python 3.14 --locked pytest tests/test_run.py --collect-only -q
+```
+
+### 独立 3.14t 环境的可重复验证
+
+先执行本文[独立环境中的 3.10 构建和测试](#独立环境中的-310-构建和测试)
+里的临时目录创建及源码复制步骤，得到新的 `$compat_dir/source`。
+随后使用以下命令代替该节的 3.10 构建命令；不要在正常工作区执行 3.14t sync：
+
+```bash
+uv --directory "$compat_dir/source" sync --python 3.14t --locked --no-install-project
+uv build "$compat_dir/source" --python 3.14t --out-dir "$compat_dir/dist"
+uv pip install --python "$compat_dir/source/.venv/bin/python" --no-deps "$compat_dir/dist/"*.whl
+env -u PYTHON_GIL uv --directory "$compat_dir/source" run --no-sync --python 3.14t python -Werror::RuntimeWarning - <<'PY'
+import sys
+import sysconfig
+
+assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+assert not sys._is_gil_enabled()
+import adb_scr
+import pytest
+
+print(adb_scr.__file__)  # 应指向临时 site-packages
+assert not sys._is_gil_enabled()
+result = pytest.main([
+    "tests/test_free_threading.py",
+    "tests/test_native_lifecycle.py",
+    "tests/test_jpg_direct.py",
+    "tests/test_jpg.py",
+    "tests/test_lifecycle.py",
+    "tests/test_device_session.py",
+    "-q", "-Werror::RuntimeWarning",
+])
+assert not sys._is_gil_enabled()
+raise SystemExit(result)
+PY
+uv --directory "$compat_dir/source" run --no-sync --python 3.14t pytest tests/test_run.py --collect-only -q
+```
+
+不能只检查 `Py_GIL_DISABLED` 编译标志，也不能用 `PYTHON_GIL=0` 或 `-X gil=0`
+强制关闭 GIL 来证明支持：未声明兼容的扩展可能在导入时自动启用 GIL。
+本节命令清除强制环境变量、将 RuntimeWarning 当作错误，并检查导入前后和
+测试后的实际状态。第三方扩展也可能改变该状态，调用方环境需独立核查。
+
 ## 2026-09-08 JPEG 直出验证
 
 Python 3.14.6 在正常工作区构建 C/Objective-C 扩展；Python 3.10.20 在独立
