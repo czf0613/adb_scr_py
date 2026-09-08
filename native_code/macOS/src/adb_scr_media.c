@@ -1,11 +1,14 @@
 #include "jpg_encoder.h"
+#include "frame_jpg_encoder.h"
 #include "vtb_decoder.h"
 #include <Python.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <math.h>
 
 typedef struct {
   void *decoder;
+  frame_jpg_encoder_t *jpg_encoder;
   pthread_mutex_t mutex;
 } decoder_handle_t;
 
@@ -14,6 +17,7 @@ static void release_decoder_handle(PyObject *capsule) {
       PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
   Py_BEGIN_ALLOW_THREADS
   vtb_destroy_decoder(&handle->decoder);
+  frame_jpg_encoder_destroy(handle->jpg_encoder);
   pthread_mutex_destroy(&handle->mutex);
   free(handle);
   Py_END_ALLOW_THREADS
@@ -90,6 +94,7 @@ static PyObject *create_decoder(PyObject *self, PyObject *args) {
 
   decoder_handle_t *handle = malloc(sizeof(decoder_handle_t));
   handle->decoder = decoder;
+  handle->jpg_encoder = NULL;
   if (pthread_mutex_init(&handle->mutex, NULL) != 0) {
     Py_BEGIN_ALLOW_THREADS
     vtb_destroy_decoder(&handle->decoder);
@@ -121,6 +126,8 @@ static PyObject *destroy_decoder(PyObject *self, PyObject *args) {
   Py_BEGIN_ALLOW_THREADS
   pthread_mutex_lock(&handle->mutex);
   vtb_destroy_decoder(&handle->decoder);
+  frame_jpg_encoder_destroy(handle->jpg_encoder);
+  handle->jpg_encoder = NULL;
   pthread_mutex_unlock(&handle->mutex);
   Py_END_ALLOW_THREADS
 
@@ -193,12 +200,120 @@ static PyObject *get_current_frame_bgra8(PyObject *self, PyObject *args) {
   return result;
 }
 
+static bool parse_jpg_options(PyObject *quality, PyObject *scale, PyObject *roi,
+                              frame_jpg_options_t *options) {
+  if (quality != NULL) {
+    if (!PyLong_Check(quality) || PyBool_Check(quality)) {
+      PyErr_SetString(PyExc_TypeError, "quality must be an integer");
+      return false;
+    }
+    long value = PyLong_AsLong(quality);
+    if (PyErr_Occurred()) {
+      return false;
+    }
+    if (value < 1 || value > 100) {
+      PyErr_SetString(PyExc_ValueError, "quality must be between 1 and 100");
+      return false;
+    }
+    options->quality = (int)value;
+  }
+  if (scale != NULL) {
+    if ((!PyFloat_Check(scale) && !PyLong_Check(scale)) || PyBool_Check(scale)) {
+      PyErr_SetString(PyExc_TypeError, "scale must be a number");
+      return false;
+    }
+    options->scale = PyFloat_AsDouble(scale);
+    if (PyErr_Occurred()) {
+      return false;
+    }
+    if (!isfinite(options->scale) || options->scale <= 0) {
+      PyErr_SetString(PyExc_ValueError, "scale must be finite and positive");
+      return false;
+    }
+  }
+  if (roi != Py_None) {
+    if (!PyTuple_Check(roi) || PyTuple_Size(roi) != 4) {
+      PyErr_SetString(PyExc_TypeError, "roi must be an (x, y, width, height) tuple");
+      return false;
+    }
+    int64_t *values[] = {&options->x, &options->y,
+                        &options->width, &options->height};
+    for (int i = 0; i < 4; i++) {
+      PyObject *value = PyTuple_GetItem(roi, i);
+      if (!PyLong_Check(value) || PyBool_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "roi values must be integers");
+        return false;
+      }
+      *values[i] = PyLong_AsLongLong(value);
+      if (PyErr_Occurred()) {
+        return false;
+      }
+    }
+    if (options->x < 0 || options->y < 0 || options->width <= 0 ||
+        options->height <= 0) {
+      PyErr_SetString(PyExc_ValueError,
+                      "roi requires nonnegative coordinates and positive size");
+      return false;
+    }
+    options->has_roi = true;
+  }
+  return true;
+}
+
+static PyObject *get_current_frame_jpg(PyObject *self, PyObject *args) {
+  (void)self;
+  PyObject *capsule, *quality = NULL, *scale = NULL, *roi = Py_None;
+  if (!PyArg_ParseTuple(args, "O|OOO", &capsule, &quality, &scale, &roi)) {
+    return NULL;
+  }
+  frame_jpg_options_t options = {.quality = 75, .scale = 1.0};
+  if (!parse_jpg_options(quality, scale, roi, &options)) {
+    return NULL;
+  }
+  decoder_handle_t *handle =
+      PyCapsule_GetPointer(capsule, "_adb_scr_media.DecoderHandle");
+  if (handle == NULL) {
+    return NULL;
+  }
+
+  CFDataRef data = NULL;
+  frame_jpg_status_t status = FRAME_JPG_FAILED;
+  // Follow the existing handle-operation lock protocol.
+  Py_BEGIN_ALLOW_THREADS
+  pthread_mutex_lock(&handle->mutex);
+  CVPixelBufferRef frame = vtb_copy_current_frame(handle->decoder);
+  if (frame != NULL) {
+    if (handle->jpg_encoder == NULL) {
+      handle->jpg_encoder = frame_jpg_encoder_create();
+    }
+    status = frame_jpg_encode(handle->jpg_encoder, frame, &options, &data);
+    CVPixelBufferRelease(frame);
+  }
+  pthread_mutex_unlock(&handle->mutex);
+  Py_END_ALLOW_THREADS
+
+  if (status == FRAME_JPG_INVALID_ROI || status == FRAME_JPG_INVALID_SIZE) {
+    PyErr_SetString(PyExc_ValueError, status == FRAME_JPG_INVALID_ROI
+        ? "roi must fit entirely inside the original frame"
+        : "scaled JPEG dimensions must not exceed 65535 pixels");
+    return NULL;
+  }
+  if (data == NULL) {
+    Py_RETURN_NONE;
+  }
+  PyObject *result = PyBytes_FromStringAndSize(
+      (const char *)CFDataGetBytePtr(data), CFDataGetLength(data));
+  CFRelease(data);
+  return result;
+}
+
 static PyMethodDef MediaExtMethods[] = {
     {"bgra8_to_jpg", bgra8_to_jpg, METH_VARARGS, NULL},
     {"create_decoder", create_decoder, METH_VARARGS, NULL},
     {"destroy_decoder", destroy_decoder, METH_VARARGS, NULL},
     {"enqueue_frame", enqueue_frame, METH_VARARGS, NULL},
     {"get_current_frame_bgra8", get_current_frame_bgra8, METH_VARARGS, NULL},
+    {"get_current_frame_jpg", get_current_frame_jpg, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
 
 static struct PyModuleDef adb_scr_media_module = {PyModuleDef_HEAD_INIT,

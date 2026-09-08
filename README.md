@@ -56,6 +56,19 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## 截图、裁剪与缩放
+
+`get_screenshot_jpg()` 支持可选的质量、缩放比例和原图裁剪区域：
+
+```python
+jpeg = await device.get_screenshot_jpg()  # quality=75, scale=1.0, roi=None
+jpeg = await device.get_screenshot_jpg(
+    quality=85, scale=0.5, roi=(100, 200, 600, 400)
+)  # 裁剪原图区域，再缩小为 300 × 200
+```
+
+ROI 使用原图左上角坐标 `(x, y, width, height)`，必须完全位于图内；None 表示整图。先裁剪再缩放，比例可大于 1。三个参数都有默认值，无参数或只传质量的现有调用无需修改；参数范围、取整和异常见 [API 文档](docs/api.md#尺寸与截图)。
+
 ## 连接与断连
 
 ```python
@@ -106,4 +119,4 @@ EOF、接收/发送失败、服务端进程退出或设备存活探测连续失�
 
 ## 许可证与依赖
 
-MIT License。屏幕传输使用 [scrcpy](https://github.com/Genymobile/scrcpy)；解码、像素转换及 JPEG 编码使用 Apple VideoToolbox、Accelerate/vImage 和 ImageIO/CoreGraphics。
+MIT License。屏幕传输使用 [scrcpy](https://github.com/Genymobile/scrcpy)；解码、像素转换及 JPEG 编码使用 Apple VideoToolbox、Accelerate/vImage、ImageIO/CoreGraphics 和 Core Image/Metal。

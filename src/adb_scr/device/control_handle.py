@@ -250,6 +250,20 @@ class DeviceControlHandle:
 
             return await self.h264_decoder.get_current_frame_bgra8()
 
+    async def get_current_frame_jpg(
+        self,
+        quality: int = 75,
+        scale: float = 1.0,
+        roi: tuple[int, int, int, int] | None = None,
+    ) -> bytes | None:
+        """按需直接编码最新原生帧，取消时等待编码完成后释放解码器锁。"""
+        if not self.running:
+            return None
+        async with self._mutex:
+            if not self.running or self.h264_decoder is None:
+                return None
+            return await self.h264_decoder.get_current_frame_jpg(quality, scale, roi)
+
     async def send_event(self, data: bytes) -> bool:
         """发送事件到设备，这是一个通用方法，组装好请求体就能发生
 

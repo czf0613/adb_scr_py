@@ -76,6 +76,38 @@ def get_current_frame_bgra8(handle: DecoderHandle) -> tuple[int, int, bytes] | N
         同步等待 GCD 并执行转换，异步调用方必须使用 asyncio.to_thread()。
     """
 
+def get_current_frame_jpg(
+    handle: DecoderHandle,
+    quality: int = 75,
+    scale: float = 1.0,
+    roi: tuple[int, int, int, int] | None = None,
+    /,
+) -> bytes | None:
+    """直接从最新 CVPixelBuffer 编码 JPEG，无 Python BGRA8 中间数据。
+
+    Args:
+        handle: create_decoder() 返回的句柄。
+        quality: 1–100 的整数，默认 75，不保证跨编码器画质一致。
+        scale: 有限正数，默认 1.0，支持缩小与放大。
+        roi: (x, y, width, height) 整数元组，原图左上角为原点，区域必须
+            完全位于原图内；None 表示整图。先裁剪再缩放。
+
+    Returns:
+        独立 JPEG bytes；无帧、关闭或编码失败时返回 None。
+
+    Raises:
+        TypeError: 参数类型错误（不接受 bool 作为数值）。
+        ValueError: 参数范围错误、ROI 越界或输出宽高超过 65535。
+        OverflowError: 整数参数超出原生数值类型范围。
+
+    Notes:
+        输出宽高分别按 floor(裁剪尺寸 * scale + 0.5) 取整，最少 1。
+        参数类型和静态范围先检查，ROI 边界及输出尺寸需要已有帧。
+        原尺寸整图优先尝试硬件 JPEG，其他情况使用 Core Image。
+        同一句柄的编码与销毁互斥；异步调用须使用 asyncio.to_thread()，
+        并在取消时等待原生工作结束。原生入口只接受位置参数。
+    """
+
 def destroy_decoder(handle: DecoderHandle) -> None:
     """幂等关闭句柄，等待在途操作、VideoToolbox 回调及 GCD 帧队列结束。
 

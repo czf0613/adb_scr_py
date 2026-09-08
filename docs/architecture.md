@@ -6,7 +6,7 @@
 
 `adb_scr_py` 的 Python 导入名为 `adb_scr`，通过 ADB 和 scrcpy 3.2 控制 Android 并接收 H.264 视频。最低支持 Python 3.10，默认开发版本为 3.14。原生媒体实现仅支持 macOS，并要求 VideoToolbox 硬件解码。
 
-库缓存最新 NV12 解码帧，按需用 Accelerate/vImage 转成 BGRA8。原始 BGRA8 通路服务于高频 NumPy/OpenCV 图像处理；JPEG 是其上的附加输出。顶层 `AndroidDevice` 当前只提供 JPEG 便捷取图，内部控制句柄仍可返回原始 BGRA8 bytes。没有历史帧队列、视频录制或自动重连。
+库缓存最新 NV12 解码帧，按需用 Accelerate/vImage 转成 BGRA8，服务于高频 NumPy/OpenCV 图像处理。顶层 `AndroidDevice.get_screenshot_jpg()` 直接从 CVPixelBuffer 编码 JPEG，支持质量、缩放比例及原图 ROI；调用者无需选择底层编码路径。内部控制句柄仍可返回原始 BGRA8 bytes，原生 `bgra8_to_jpg()` 工具函数也继续保留。没有历史帧队列、视频录制或自动重连。
 
 ## 模块与数据流
 
@@ -26,6 +26,9 @@ flowchart TD
     Native --> BGRA[BGRA8 bytes]
     BGRA --> CV[NumPy / OpenCV]
     BGRA --> JPEG[ImageIO JPEG]
+    Native --> Snapshot[retain 最新 NV12 快照]
+    Snapshot --> Direct[VideoToolbox 硬件 JPEG / Core Image]
+    Direct --> Bytes[JPEG bytes]
 ```
 
 | 文件 | 职责 |
@@ -46,6 +49,7 @@ flowchart TD
 | `vtb_decoder.c` | VideoToolbox session、回调、最新帧串行队列及有序销毁 |
 | `vtb_helper.c` | Annex B 处理及 NV12 → BGRA8 转换 |
 | `jpg_encoder.c` | ImageIO/CoreGraphics JPEG 编码 |
+| `frame_jpg_encoder.m` | NV12 直接编码 JPEG；复用硬件会话及 Core Image 上下文，裁剪、缩放和回退 |
 
 ## 初始化与连接所有权
 
@@ -96,9 +100,15 @@ Capsule 指向稳定的容器，容器持有 `decoder` 指针和原生互斥锁�
 
 VideoToolbox 输出回调 retain 图像后，将替换工作提交到解码器的 GCD 串行队列。最新帧替换与 BGRA8 转换均在该队列内执行。转换检查像素锁定返回值，用只读锁配对解锁；Python 最终得到独立 bytes。
 
+JPEG 直出在 GCD 队列内取得 retain 的帧快照，随后在队列外编码；编码期间即使当前帧被替换，快照仍存活。原生句柄锁保护快照取得、编码器状态和关闭，Python 控制句柄锁仍协调入队、解码器替换及取图。取消须等工作线程结束后才释放这些保护。编码结果复制为独立 Python JPEG bytes，不产生 Python BGRA8 中间数据。
+
+每个 Capsule 按需持有一个 JPEG 编码器。`roi=None, scale=1.0` 时尝试要求硬件加速的 VideoToolbox JPEG session，按输入尺寸复用并使用递增时间戳；每次请求更新质量。创建、参数设置或编码失败后，同一尺寸后续请求使用 Core Image，直到编码器重新创建或输入尺寸变化。无需硬编码厂商 EncoderID。
+
+裁剪、缩放及硬件回退使用复用的 CIContext；有 Metal 设备时使用 Metal，没有时用软件上下文。Core Image 读取 NV12，按原图左上角坐标转换 ROI，再裁剪、平移、缩放并输出 JPEG。使用 sRGB 输出色彩空间，不承诺跨编码器相同画质，也不将 Core Image 的 JPEG 压缩描述为全程 GPU 执行。宽高独立四舍五入，最少 1、最多 65535 像素；系统不支持的实际编码尺寸仍可能失败。具体参数和异常见 API 文档。
+
 销毁顺序为：阻止同一句柄新操作 → 等待 VideoToolbox 异步回调 → invalidate/release session → 同步进入 GCD 队列，确认旧任务结束并释放最终帧 → 释放队列与 decoder → 清空容器指针。等待 VideoToolbox 不等于等待回调另行提交的 GCD block，必须保留后者的同步步骤。
 
-创建、取帧、销毁从异步调用路径进入 `to_thread()`。原生句柄操作等待/执行期间释放 GIL，并由容器互斥锁保护；快速入队在正常控制句柄路径不与取帧/关闭竞争。JPEG 编码仍经工作线程调用，但其 C 包装没有专门释放 GIL，不能把工作线程调度描述为所有 Python 线程都不受影响。扩展未声明 free-threaded 支持。
+创建、取帧、销毁从异步调用路径进入 `to_thread()`。原生句柄操作（含 JPEG 直出）沿用释放 GIL 和容器互斥锁协议；快速入队在正常控制句柄路径不与取帧/关闭竞争。旧 `bgra8_to_jpg()` 的 GIL 行为不变，其 C 包装没有专门释放 GIL；本次没有统一调整 GIL 策略。JPEG 会话销毁前等待编码完成，CIContext 和色彩空间随 Capsule 关闭释放。扩展未声明 free-threaded 支持。
 
 ## 并发边界
 
@@ -107,8 +117,8 @@ VideoToolbox 输出回调 retain 图像后，将替换工作提交到解码器�
 | 模块级 asyncio 锁 | 库初始化/反初始化 |
 | 设备 asyncio 锁 | 会话建立/回收、应用命令、指定手势序列 |
 | 控制句柄 asyncio 锁 | 解码器创建/替换、取帧、入队、关闭 |
-| Capsule 容器原生锁 | 同一原生 decoder 的操作与销毁 |
-| 每解码器 GCD 串行队列 | 当前 CVPixelBuffer 的替换、转换及最终释放 |
+| Capsule 容器原生锁 | 同一原生 decoder 的操作、JPEG 编码器复用与销毁 |
+| 每解码器 GCD 串行队列 | 当前 CVPixelBuffer 的替换、BGRA8 转换、JPEG 快照 retain 及最终释放 |
 
 asyncio 锁不提供跨事件循环保证。多设备拥有独立会话、队列和解码器；ADB daemon 和模块配置仍在进程内共享。
 

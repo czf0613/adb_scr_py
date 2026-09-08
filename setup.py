@@ -8,6 +8,7 @@ match sys.platform:
         srcs = [
             "native_code/macOS/src/adb_scr_media.c",
             "native_code/macOS/src/jpg_encoder.c",
+            "native_code/macOS/src/frame_jpg_encoder.m",
             "native_code/macOS/src/vtb_decoder.c",
             "native_code/macOS/src/vtb_helper.c",
         ]
@@ -28,6 +29,12 @@ match sys.platform:
                     "VideoToolbox",
                     "-framework",
                     "Accelerate",
+                    "-framework",
+                    "Foundation",
+                    "-framework",
+                    "CoreImage",
+                    "-framework",
+                    "Metal",
                 ],
             )
         )

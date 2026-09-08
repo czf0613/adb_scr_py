@@ -6,6 +6,34 @@
 
 Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖或使用较新语法/标准库 API 时，要在真实 3.10 解释器下验证；仅在 3.14 上通过测试不能证明最低版本可用。
 
+## 2026-09-08 JPEG 直出验证
+
+Python 3.14.6 在正常工作区构建 C/Objective-C 扩展；Python 3.10.20 在独立
+临时源树构建 sdist，再从 sdist 构建 wheel 并安装。正常 `.venv` 和
+`.python-version` 继续使用 3.14。
+
+两个版本均通过 60 项相关无设备测试（下列五个文件），编译 24 个 Python/
+存根文件并导入 16 个模块。`test_run.py` 均只收集 1 项，未执行。合成 H.264
+显式声明 BT.709；测试覆盖默认质量、缩小/放大、奇数 ROI、四角颜色、先裁剪
+后缩放、取整、非法参数、无帧/关闭、会话复用及质量切换、取消和并发销毁。
+公开入口统一为 `get_screenshot_jpg(quality=75, scale=1.0, roi=None)`，覆盖
+无参数调用及原有质量位置参数/关键字参数调用的兼容性。
+本机 M5 Max/macOS 26.6.2 实际通过硬件 JPEG 测试，同时强制模拟硬件不可用
+验证 Core Image 回退；未以跳过硬件用例代替验证。
+
+3.10 发布归档已确认包含新增 `frame_jpg_encoder.m`/`.h` 原生源码、资源和
+类型信息，并排除 docs/、tests/、AGENTS.md。新增 Python 测试通过 Ruff 检查；
+改动涉及的 Python/存根通过限定 E4/E7/E9/F 检查，未清理历史风格诊断。
+
+```bash
+uv run --python 3.14 --locked setup.py build_ext --inplace
+uv run --python 3.14 --locked pytest tests/test_jpg_direct.py tests/test_native_lifecycle.py tests/test_jpg.py tests/test_lifecycle.py tests/test_device_session.py -q
+uv run --python 3.14 --locked pytest tests/test_run.py --collect-only -q
+```
+
+未运行 ADB 真机操作、其他 Mac 型号或长期性能测试。独立 3.10 环境的复制、
+构建和归档检查步骤见本文后续章节；测试文件列表使用上面的五个文件。
+
 ## 2026-09-07 生命周期与 API 整理验证
 
 本次验证平台为 macOS arm64。Python 3.14.6 在正常工作区构建原生扩展；

@@ -19,7 +19,7 @@ class H264DecoderBase(ABC):
         height: int
 
     def __init__(self) -> None:
-        """子类实现这个方法时需要顺带初始化内部的解码器句柄，所以这个方法可能会抛出异常（类里面的其它方法不会）
+        """初始化内部解码器状态；子类还需要创建原生句柄。
 
         Raises:
             AdbScrPyH264DecoderException: 如果初始化失败，则抛出此异常
@@ -58,3 +58,12 @@ class H264DecoderBase(ABC):
             如果获取成功，则返回一个元组，包含视频的宽度、高度和BGRA8格式的视频帧数据；否则返回None
         """
         pass
+
+    @abstractmethod
+    async def get_current_frame_jpg(
+        self,
+        quality: int = 75,
+        scale: float = 1.0,
+        roi: tuple[int, int, int, int] | None = None,
+    ) -> bytes | None:
+        """从最新原生帧直接编码 JPEG；ROI 以原图左上角为原点，先裁剪再缩放。"""

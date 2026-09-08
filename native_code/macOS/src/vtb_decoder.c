@@ -222,3 +222,17 @@ bool vtb_current_frame_bgra8(void *decoder, uint8_t **out_data,
 
   return exec_result;
 }
+
+CVPixelBufferRef vtb_copy_current_frame(void *decoder) {
+  if (decoder == NULL) {
+    return NULL;
+  }
+  vtb_decoder_t *vtb_decoder = decoder;
+  __block CVPixelBufferRef frame = NULL;
+  dispatch_sync(vtb_decoder->queue, ^{
+    if (vtb_decoder->current_frame != NULL) {
+      frame = CVPixelBufferRetain(vtb_decoder->current_frame);
+    }
+  });
+  return frame;
+}

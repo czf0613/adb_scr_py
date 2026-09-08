@@ -10,6 +10,7 @@ from .._adb_scr_media import (
     destroy_decoder,
     enqueue_frame,
     get_current_frame_bgra8,
+    get_current_frame_jpg,
 )
 from .decoder_base import H264DecoderBase
 
@@ -77,4 +78,16 @@ class VtbH264Decoder(H264DecoderBase):
 
         return await complete_on_cancel(
             asyncio.to_thread(get_current_frame_bgra8, self.handle)
+        )
+
+    async def get_current_frame_jpg(
+        self,
+        quality: int = 75,
+        scale: float = 1.0,
+        roi: tuple[int, int, int, int] | None = None,
+    ) -> bytes | None:
+        if not self.valid:
+            return None
+        return await complete_on_cancel(
+            asyncio.to_thread(get_current_frame_jpg, self.handle, quality, scale, roi)
         )

@@ -76,12 +76,36 @@ EOF、接收或写入失败、服务端子进程退出、探测连续失败统�
 
 ```python
 def get_screen_size() -> tuple[int, int] | None: ...
-async def get_screenshot_jpg(quality: int = 75) -> bytes | None: ...
+async def get_screenshot_jpg(
+    quality: int = 75,
+    scale: float = 1.0,
+    roi: tuple[int, int, int, int] | None = None,
+) -> bytes | None: ...
 ```
 
 尺寸以 `(width, height)` 返回，单位为像素；会话不可用返回 `None`。坐标原点位于左上角，范围为 `0 <= x < width`、`0 <= y < height`。屏幕旋转会在新配置到达后更新尺寸。
 
 JPEG 质量要求为 1–100 的整数。截图返回独立 JPEG `bytes`；会话不可用、尚无帧或编码失败时返回 `None`。连接成功不等于首帧就绪，调用方应在截止时间内重试。截图可能重复同一画面；没有“必须低于 5 FPS”的固定限制，也没有固定性能保证。
+
+`get_screenshot_jpg()` 支持可选的缩放比例和原图 ROI。三个参数都有默认值；现有 `get_screenshot_jpg()`、`get_screenshot_jpg(90)` 和 `get_screenshot_jpg(quality=90)` 调用继续有效。相同质量值无需对应不同编码器下的相同画质。
+
+| 参数 | 默认值 | 约束与语义 |
+| --- | --- | --- |
+| `quality` | `75` | 1–100 的整数 |
+| `scale` | `1.0` | 有限正数；小于 1 缩小、大于 1 放大 |
+| `roi` | `None` | `(x, y, width, height)` 整数元组；使用原图像素坐标，原点在左上角；None 输出整图 |
+
+**先裁剪，再缩放**。ROI 对应 `image[y:y+height, x:x+width]`，必须完全位于当前原生帧内，不自动截断越界区域。允许奇数坐标和尺寸。输出宽高分别按 `max(1, floor(裁剪尺寸 * scale + 0.5))` 计算，上限为 65535 像素；具体系统编码器也可能因资源或尺寸限制失败。ROI 的边界以实际取得的帧为准，因此不会使用旋转前缓存的宽高检查。
+
+参数类型错误抛 `TypeError`（不接受 bool 作为数值）；质量、比例、ROI、输出尺寸越界抛 `ValueError`；整数超出原生数值类型范围抛 `OverflowError`。会话不可用时直接返回 None；静态参数检查由原生入口执行，ROI 边界和输出尺寸检查需要已有解码帧。取消等待会先等待原生编码结束，再传播 `CancelledError`。
+
+```python
+jpeg = await device.get_screenshot_jpg()  # 整图，75，原比例
+jpeg = await device.get_screenshot_jpg(scale=0.5)  # 整图缩小一半
+jpeg = await device.get_screenshot_jpg(
+    quality=85, scale=2.0, roi=(100, 200, 300, 150)
+)  # 裁剪原图区域，再放大成 600 × 300
+```
 
 内部原始帧接口返回 `(width, height, bgra_bytes)`，像素按 B、G、R、A 排列，长度为 `width * height * 4`。它仍位于内部控制句柄/解码器层，没有新增顶层 BGRA8 API。NumPy/OpenCV 用法见 [BGRA8 消费说明](control-flow.md#bgra8-到-opencv-的消费方式)。
 

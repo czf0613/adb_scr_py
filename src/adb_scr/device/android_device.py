@@ -16,7 +16,6 @@ from ..adb_cmd.device_control import (
 )
 from ..async_utils import complete_on_cancel, stop_process
 from ..logger import logger
-from ..media_ext import bgra8_to_jpg
 from .bin_utils import random_sleep_ms, to_u32_be
 from .control_handle import DeviceControlHandle
 from .options import ConnectionOptions
@@ -292,38 +291,38 @@ class AndroidDevice:
 
         return self.control_handle.screen_width, self.control_handle.screen_height
 
-    async def get_screenshot_jpg(self, quality: int = 75) -> bytes | None:
-        """将最新解码帧编码为 JPEG。
+    async def get_screenshot_jpg(
+        self,
+        quality: int = 75,
+        scale: float = 1.0,
+        roi: tuple[int, int, int, int] | None = None,
+    ) -> bytes | None:
+        """获取最新视频帧的 JPEG 截图，可选原图裁剪和缩放。
 
         Args:
-            quality: JPEG 质量，调用方应传入 1 到 100 的整数，默认 75。
+            quality: 1 到 100 的整数，默认 75；不保证不同编码器画质一致。
+            scale: 有限正数，默认 1.0；小于 1 缩小，大于 1 放大。
+            roi: 原图像素坐标 (x, y, width, height)，左上角为原点；必须
+                完全位于当前帧内。None 表示整图，默认 None。
 
         Returns:
-            JPEG bytes；未连接、尚无解码帧或编码失败时返回 None。
+            独立 JPEG bytes；未连接、尚无帧或编码失败时返回 None。
+
+        Raises:
+            TypeError: 参数类型不符合约定（bool 不作为数值接受）。
+            ValueError: 质量、比例、ROI 或缩放后尺寸超出有效范围。
+            OverflowError: 整数参数超出原生数值类型范围。
 
         Notes:
-            返回的是独立 bytes，多次调用可能得到同一帧。取帧转换及编码有
-            分配和复制开销；没有固定的 5 FPS 限制或吞吐保证。耗时原生操作
-            使用工作线程；取消取帧会等待在途原生读取结束。
+            先裁剪再缩放。输出宽高分别按 floor(裁剪尺寸 * scale + 0.5)
+            取整，最少 1 像素，最多 65535 像素；不要求偶数尺寸。
+            ROI 边界以取得的帧为准，不依赖可能已过期的屏幕尺寸缓存。
+            无可用会话时直接返回 None；ROI 越界检查需要已有解码帧。
+            多次调用可能返回同一帧，取消会等待原生工作结束。
         """
         if self.control_handle is None:
-            logger.warning("设备未连接，无法获取屏幕截图")
             return None
-
-        frame_data = await self.control_handle.get_current_frame()
-        if frame_data is None:
-            return None
-
-        width, height, bgra_data = frame_data
-        # 编码图片可能会有点久，为了防止卡解释器，这里用异步方式执行
-        jpg_data = await asyncio.to_thread(
-            bgra8_to_jpg, width, height, bgra_data, quality
-        )
-        if jpg_data is None:
-            logger.error("将BGRA数据转换为JPG格式失败")
-            return None
-
-        return jpg_data
+        return await self.control_handle.get_current_frame_jpg(quality, scale, roi)
 
     def _check_in_screen(self, x: int, y: int) -> bool:
         """检查坐标是否在屏幕内，防止后续操作出现意外。

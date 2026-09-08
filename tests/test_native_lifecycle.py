@@ -194,12 +194,15 @@ with concurrent.futures.ThreadPoolExecutor(4) as pool:
         futures = []
         for i in range(12):
             futures.append(pool.submit(m.get_current_frame_bgra8, handle))
+            futures.append(pool.submit(m.get_current_frame_jpg, handle, 75,
+                                       0.5 if i % 2 else 1.0))
             futures.append(pool.submit(m.enqueue_frame, handle, idr, i))
         futures.append(pool.submit(m.destroy_decoder, handle))
         futures.append(pool.submit(m.destroy_decoder, handle))
         for future in futures:
             future.result()
         assert m.get_current_frame_bgra8(handle) is None
+        assert m.get_current_frame_jpg(handle) is None
 """
     result = subprocess.run(
         [sys.executable, "-c", script, str(h264)],

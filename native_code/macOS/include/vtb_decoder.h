@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <CoreVideo/CoreVideo.h>
 
 /**
  * @brief 创建VTB解码器
@@ -49,5 +50,8 @@ bool vtb_enqueue_frame(void *decoder, const uint8_t *frame, size_t frame_size,
  */
 bool vtb_current_frame_bgra8(void *decoder, uint8_t **out_data,
                              size_t *out_width, size_t *out_height);
+
+// Caller owns the retained snapshot and must release it after use.
+CVPixelBufferRef vtb_copy_current_frame(void *decoder);
 
 #endif

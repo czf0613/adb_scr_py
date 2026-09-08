@@ -16,9 +16,11 @@ flowchart LR
     Convert --> BGRA[BGRA8 bytes]
     BGRA --> Matrix[NumPy 数组 / OpenCV]
     BGRA --> JPEG[按需 ImageIO JPEG 编码]
+    NV12 --> Snapshot[retain 原生帧快照]
+    Snapshot --> Direct[JPEG 直出 / 可选裁剪缩放]
 ```
 
-两处加速各有职责：H.264 解码通过 VideoToolbox 要求硬件解码器；NV12 → BGRA8 通过 Accelerate/vImage 利用 CPU 向量处理能力执行原生转换。当前转换没有使用 Metal 或 GPU compute；这里的像素转换加速具体指 CPU SIMD 等底层优化。[Apple vImage 说明](https://developer.apple.com/documentation/accelerate/vimage-library)明确描述了其 CPU 向量处理模型。
+两处原始帧加速各有职责：H.264 解码通过 VideoToolbox 要求硬件解码器；NV12 → BGRA8 通过 Accelerate/vImage 利用 CPU 向量处理能力执行原生转换。BGRA8 通路没有改用 Metal 或 GPU compute；这里的像素转换加速具体指 CPU SIMD 等底层优化。[Apple vImage 说明](https://developer.apple.com/documentation/accelerate/vimage-library)明确描述了其 CPU 向量处理模型。新增 JPEG 直出则使用独立的 VideoToolbox/Core Image 路径，详见下文。
 
 「频繁取帧」是设计目标，不是已经测得的固定帧率保证。当前还存在像素分配/复制和 Python 层的解码器锁，不能将 JPEG 接口的使用建议、测试脚本的采样周期直接当作 BGRA8 通路的性能上限。
 
@@ -87,6 +89,7 @@ sequenceDiagram
 | `connect()` 返回后首次取尺寸/图像 | 已等待有效元数据，但尚未保证首帧 | 取尺寸不再依赖固定 sleep；首帧由调用方在截止时间内检查。 |
 | `disconnect_sockets()` | 取消并等待接收任务、关闭流、关闭解码器 | 旧实现两处 0.5 秒缓冲已经替换为实际完成等待；固定时间不能证明资源已停止使用。 |
 | `get_current_frame_bgra8()` | `dispatch_sync`，没有固定秒数 | 等待解码器串行队列轮到取帧，并在队列内完成 NV12 → BGRA8。耗时取决于队列工作和像素转换。 |
+| `get_current_frame_jpg()` | 队列内 retain 快照，队列外等待编码 | 原生句柄锁保护编码器及关闭；VideoToolbox 等待输出回调或 Core Image 完成 JPEG 输出后返回。 |
 | `destroy_decoder()` | VideoToolbox 完成等待，再同步排空 GCD 队列 | 先确保没有新的回调提交，再确认已提交的帧替换结束并释放最终帧；没有强制销毁超时。[Apple API 说明](https://developer.apple.com/documentation/videotoolbox/vtdecompressionsessionwaitforasynchronousframes(_:))。 |
 | 设备连接与 I/O | `ConnectionOptions`：默认连接预算 30 秒，I/O 5 秒 | 覆盖隧道完整握手、元数据、半包和写入背压。静态画面间隔没有超时；主动 transport 探测负责补充 EOF/进程退出检测。 |
 | `tests/test_run.py` | 滑动前等 3 秒；截图循环每轮等 1 秒 | 属于真机演示/稳定性测试的启动缓冲和采样节奏，库并未要求每帧等 1 秒，也未要求每次操作前等 3 秒。 |
@@ -122,7 +125,7 @@ Python 不在打开 socket 时凭屏幕宽高创建解码器，而是在视频�
 
 ### 读取当前帧
 
-取帧通过 `dispatch_sync(queue, ...)` 进入同一队列：若当前帧为空则返回失败；否则读取当前 NV12 像素并完成 BGRA8 转换。转换期间，后续替换任务排在队列中，因此不会同时把正在读的帧释放掉。Python 随后取得独立的像素 `bytes`。
+BGRA8 取帧通过 `dispatch_sync(queue, ...)` 进入同一队列：若当前帧为空则返回失败；否则读取当前 NV12 像素并完成 BGRA8 转换。转换期间，后续替换任务排在队列中，因此不会同时把正在读的帧释放掉。Python 随后取得独立的像素 `bytes`。JPEG 直出仅在队列内 retain 最新帧，随后在队列外编码并释放快照；旧帧不会因新帧替换而提前销毁。
 
 ```text
 同一个解码器的队列：
@@ -134,7 +137,7 @@ Python 不在打开 socket 时凭屏幕宽高创建解码器，而是在视频�
 ### 队列之外的生命周期仍要管理
 
 - Python 的 `DeviceControlHandle._mutex` 仍负责协调解码器替换、入队、读取和销毁；GCD 对最新帧的串行访问不能替代句柄生命周期保护。
-- 创建、取帧和销毁通过 `asyncio.to_thread()` 调度。原生句柄操作释放 GIL 并以容器互斥锁协调；JPEG 包装仍未单独释放 GIL。取消协程时必须等待在途线程及资源安装完成，不能假定线程已终止。
+- 创建、取帧和销毁通过 `asyncio.to_thread()` 调度。原生句柄操作（含 JPEG 直出）沿用释放 GIL 和容器互斥锁协议；旧 BGRA8 → JPEG 包装的 GIL 行为保持不变。取消协程时必须等待在途线程及资源安装完成，不能假定线程已终止。
 - 当前销毁先等待 VideoToolbox 回调结束，再同步进入 GCD 队列释放最终帧，最后释放队列与结构体。旧实现漏等 GCD 任务，存在 use-after-free 风险；不得移除这一完成等待。Capsule 持有稳定容器，关闭清空容器指针，重复关闭和关闭后调用安全失败。
 
 ## NV12 快速转换为 BGRA8
@@ -153,7 +156,7 @@ Python 不在打开 socket 时凭屏幕宽高创建解码器，而是在视频�
 
 ## BGRA8 到 OpenCV 的消费方式
 
-现有调用链为 `DeviceControlHandle.get_current_frame()` → `H264DecoderBase.get_current_frame_bgra8()`，返回 `(width, height, bgra_bytes)` 或 `None`。它位于内部控制句柄/解码器层；`AndroidDevice` 当前公开的便捷取图方法是 `get_screenshot_jpg()`，没有独立的公开 BGRA8 方法。本文记录原有设计用途，不新增 API。
+现有调用链为 `DeviceControlHandle.get_current_frame()` → `H264DecoderBase.get_current_frame_bgra8()`，返回 `(width, height, bgra_bytes)` 或 `None`。它位于内部控制句柄/解码器层；`AndroidDevice` 公开 `get_screenshot_jpg()`，没有独立的公开 BGRA8 方法。
 
 调用方取得有效的原始帧后，可以建立 OpenCV 所用的 NumPy 图像数组：
 
@@ -169,6 +172,18 @@ def frame_to_bgra_array(frame: tuple[int, int, bytes]) -> np.ndarray:
 `numpy.frombuffer()` 在原始对象上创建视图，这一步可复用 Python `bytes` 的像素内存；以不可变 `bytes` 为底层的数组不可原地写入，需要可写数据时再 `.copy()`。视图不引用会被解码器替换的 `CVPixelBuffer`，其生命周期跟随 Python 对象。[NumPy frombuffer 文档](https://numpy.org/doc/stable/reference/generated/numpy.frombuffer.html)。
 
 结果形状是 `(height, width, 4)`，不能直接按三通道 BGR reshape；需要 BGR 或灰度的 OpenCV 操作，应由调用方做明确的颜色转换。耗时的 OpenCV 分析应在取得帧、释放内部锁之后进行，避免占用负责收流和取帧的临界区。NumPy/OpenCV 由消费端按需安装，当前库没有将它们设为运行依赖。
+
+## JPEG 直出与裁剪缩放
+
+`get_screenshot_jpg(quality=75, scale=1.0, roi=None)` 通过控制句柄和解码器进入原生 `get_current_frame_jpg()`。公开截图方法名及原有 quality 参数调用方式保持不变，编码路径由内部选择。原始帧 API 和 `bgra8_to_jpg()` 工具函数继续保留；JPEG 只在请求时编码，不对所有解码帧预先压缩。
+
+原比例整图优先尝试要求硬件加速的 JPEG session。会话按尺寸复用，每次编码更新质量，并使用递增时间戳；`VTCompressionSessionCompleteFrames(..., kCMTimeInvalid)` 等待所有输出后才释放输入快照。不能用“截图不是视频”为由对复用的编码会话反复传相同时间戳。
+
+裁剪、缩放或硬件不可用时使用复用的 CIContext。ROI 是原图的 `(x, y, width, height)`；Core Image 坐标使用左下角，需将纵坐标转换为 `原图高度 - y - height`。先裁剪，再平移到原点、缩放并裁剪到取整后的输出边界。插值前扩展边缘，避免混入透明黑边。输出宽高分别按四舍五入计算，最少 1 像素。
+
+Core Image 能从 CVPixelBuffer 读取 YUV，在 Metal 可用时使用 Metal 上下文；没有 Metal 设备时使用软件上下文。该路径并不保证 JPEG 压缩全程由 GPU 完成。输出使用 sRGB，系统读取输入色彩信息；不要求不同编码器在相同质量参数下输出相同画质。公开参数和错误约定见 [API 参考](api.md#尺寸与截图)。
+
+JPEG 编码器属于 Capsule，由原生句柄锁保护，关闭时完成编码并释放 session、CIContext 和色彩空间。JPEG bytes 已复制出来，因此解码器随后销毁不影响调用方保存的图片。本次没有对旧接口进行统一 GIL 治理。
 
 ## 后续 Agent 应保留的设计约束
 
