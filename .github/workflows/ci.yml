@@ -1,0 +1,82 @@
+name: macOS build and test
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI_PYTHON_VERSION: ${{ matrix.python }}
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.13"
+          # uv accepts a free-threaded interpreter for an unqualified 3.14 request.
+          python-version: ${{ matrix.python == '3.14' && '3.14+gil' || matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ${{ matrix.os }}-${{ matrix.python }}
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          uv --version
+
+      - name: Install locked dependencies
+        run: uv sync --locked --no-install-project
+
+      - name: Build native extension in place
+        run: uv run --no-sync setup.py build_ext --inplace
+
+      - name: Build sdist and wheel
+        # With neither --sdist nor --wheel, uv builds the wheel from the sdist.
+        run: uv build --out-dir dist
+
+      - name: Install the built wheel
+        run: uv pip install --python .venv/bin/python --no-deps dist/*.whl
+
+      - name: Verify package and run tests without a device
+        # Keep the installed wheel; a sync here would restore an editable install.
+        run: >-
+          env -u PYTHON_GIL uv run --no-sync python -Werror::RuntimeWarning
+          .github/scripts/check_ci.py "$CI_PYTHON_VERSION"
+
+      - name: Upload build artifacts and test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.os }}-python-${{ matrix.python }}
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
+            test-results.xml
+          retention-days: 7

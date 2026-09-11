@@ -6,6 +6,10 @@
 
 Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖或使用较新语法/标准库 API 时，要在真实 3.10 解释器下验证；仅在 3.14 上通过测试不能证明最低版本可用。
 
+推送到 `master` 后的自动构建矩阵为 macOS 15/26 arm64 × Python 3.10–3.14、3.14t。
+CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14t 的实际 GIL 状态。
+云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。
+
 ## 2026-09-11 H.264/AAC 屏幕录制验证
 
 新增 `AndroidDevice.start_recording(output_file)` / `stop_recording()`，连接前
