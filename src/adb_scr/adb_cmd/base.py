@@ -86,6 +86,18 @@ async def adb_devices() -> list[str]:
     ]
 
 
+async def adb_android_api_level(serial: str, timeout: float = 10.0) -> int:
+    """在启动 scrcpy 前读取设备 API 级别；失败或非法结果不猜测版本。"""
+    code, stdout, _ = await _run(
+        "-s", serial, "shell", "getprop", "ro.build.version.sdk",
+        capture=True, timeout=timeout,
+    )
+    value = stdout.strip()
+    if code != 0 or not value.isdigit() or not 0 < int(value) < 10000:
+        raise RuntimeError("无法读取有效的 Android API 级别")
+    return int(value)
+
+
 async def adb_device_cmd(
     serial: str, cmd: str, *args: str, timeout: float = 10.0
 ) -> bool:

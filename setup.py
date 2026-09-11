@@ -9,6 +9,7 @@ match sys.platform:
             "native_code/macOS/src/adb_scr_media.c",
             "native_code/macOS/src/jpg_encoder.c",
             "native_code/macOS/src/frame_jpg_encoder.m",
+            "native_code/macOS/src/recording.m",
             "native_code/macOS/src/vtb_decoder.c",
             "native_code/macOS/src/vtb_helper.c",
         ]
@@ -33,6 +34,10 @@ match sys.platform:
                     "Foundation",
                     "-framework",
                     "CoreImage",
+                    "-framework",
+                    "AVFoundation",
+                    "-framework",
+                    "AudioToolbox",
                     "-framework",
                     "Metal",
                 ],

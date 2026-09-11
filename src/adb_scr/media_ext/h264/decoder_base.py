@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .._adb_scr_media import RecordingHandle
+
 __all__ = []
 
 
@@ -67,3 +70,13 @@ class H264DecoderBase(ABC):
         roi: tuple[int, int, int, int] | None = None,
     ) -> bytes | None:
         """从最新原生帧直接编码 JPEG；ROI 以原图左上角为原点，先裁剪再缩放。"""
+
+    @abstractmethod
+    async def start_recording(
+        self, output_file: str, audio_config: bytes | None, source_pts: int, fps: int
+    ) -> "RecordingHandle":
+        """从当前原生帧开始录制并订阅后续解码输出，返回原生录制句柄。"""
+
+    @abstractmethod
+    async def set_recording(self, recording: "RecordingHandle | None") -> None:
+        """在解码器替换或关闭前解绑录制，或将现有录制绑定到新解码器。"""

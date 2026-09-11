@@ -54,17 +54,30 @@ async def stop_app(serial: str, package_name: str) -> bool:
     return await adb_device_cmd(serial, "shell", "am", "force-stop", package_name)
 
 
-async def start_scrcpy_server(serial: str, scid: str) -> subprocess.Process | None:
+async def start_scrcpy_server(
+    serial: str, scid: str, *, android_api_level: int = 0
+) -> subprocess.Process | None:
     """启动ADB设备上的scrcpy服务器。
 
     Args:
         scid: scrcpy会话ID。
+        android_api_level: 已查询的 Android API 级别；>=33 保留手机外放，
+            30–32 使用 output，低于 30 关闭音频。
 
     Returns:
         scrcpy服务器进程对象，若启动失败则为None。
     """
     process = None
     transferred = False
+    audio_options = ["audio=false"]
+    if android_api_level >= 30:
+        duplicate = android_api_level >= 33
+        audio_options = [
+            "audio=true",
+            "audio_codec=aac",
+            "audio_source=playback" if duplicate else "audio_source=output",
+            f"audio_dup={str(duplicate).lower()}",
+        ]
 
     async def spawn():
         nonlocal process
@@ -84,7 +97,7 @@ async def start_scrcpy_server(serial: str, scid: str) -> subprocess.Process | No
             f"max_fps={consts.SCREEN_FPS}",
             "video=true",
             "video_codec=h264",
-            "audio=false",
+            *audio_options,
             "control=true",
             "cleanup=false",
             stdin=subprocess.DEVNULL,

@@ -13,6 +13,8 @@ from .bin_utils import (
     to_u32_be,
 )
 from .options import ConnectionOptions
+from .audio_stream import AudioStream
+from .recording import RecordingController
 from .tcp_forward_tunnel import setup_tunnel
 from .types import GestureAction
 
@@ -33,6 +35,8 @@ class DeviceControlHandle:
         # 用于传输视频流的socket
         video_socket_reader: asyncio.StreamReader | None
         video_socket_writer: asyncio.StreamWriter | None
+        audio_socket_reader: asyncio.StreamReader | None
+        audio_socket_writer: asyncio.StreamWriter | None
         # 用于传输控制流的socket
         control_socket_reader: asyncio.StreamReader | None
         control_socket_writer: asyncio.StreamWriter | None
@@ -42,7 +46,8 @@ class DeviceControlHandle:
         _mutex: Lock
 
     def __init__(
-        self, serial: str, scid: str, *, options: ConnectionOptions | None = None
+        self, serial: str, scid: str, *, options: ConnectionOptions | None = None,
+        audio_enabled: bool = False,
     ) -> None:
         self.options = options or ConnectionOptions()
         self.disconnect_reason: str | None = None
@@ -61,12 +66,17 @@ class DeviceControlHandle:
         self.video_socket_writer = None
         self.control_socket_reader = None
         self.control_socket_writer = None
+        self.audio_enabled = audio_enabled
+        self.audio_socket_reader = None
+        self.audio_socket_writer = None
+        self.audio_stream: AudioStream | None = None
 
         self.h264_decoder = None
         self._mutex = Lock()
+        self.recording = RecordingController(self)
 
     async def connect_sockets(self) -> bool:
-        """按视频、控制顺序连接，等待视频元数据；失败或取消时完整回滚。"""
+        """按视频、可选音频、控制顺序连接，失败或取消时完整回滚。"""
         if self.running:
             return True
         if self._close_task is not None:
@@ -81,6 +91,19 @@ class DeviceControlHandle:
             if video is None:
                 raise ConnectionError("视频隧道建立失败")
             self.video_socket_reader, self.video_socket_writer = video
+            if self.audio_enabled:
+                audio = await setup_tunnel(
+                    self.serial, self.uds_name,
+                    timeout=self.options.io_timeout,
+                    close_timeout=self.options.close_timeout,
+                )
+                if audio is None:
+                    raise ConnectionError("音频隧道建立失败")
+                self.audio_socket_reader, self.audio_socket_writer = audio
+                self.audio_stream = AudioStream(
+                    self.audio_socket_reader, self.options.io_timeout,
+                    self.recording.append_audio,
+                )
             control = await setup_tunnel(
                 self.serial,
                 self.uds_name,
@@ -95,7 +118,11 @@ class DeviceControlHandle:
                 asyncio.create_task(self.process_video_upstream()),
                 asyncio.create_task(self.process_control_upstream()),
             ]
+            if self.audio_stream is not None:
+                self.async_tasks.append(asyncio.create_task(self.process_audio_upstream()))
             await asyncio.wait_for(self._ready.wait(), self.options.io_timeout)
+            if self.audio_stream is not None:
+                await asyncio.wait_for(self.audio_stream.ready.wait(), self.options.io_timeout)
             if not self.running:
                 raise ConnectionError(self.disconnect_reason)
             return True
@@ -127,6 +154,8 @@ class DeviceControlHandle:
 
     async def _replace_decoder(self, data: bytes) -> None:
         if self.h264_decoder is not None:
+            if self.recording.active is not None:
+                await self.h264_decoder.set_recording(None)
             await self.h264_decoder.close_decoder()
             self.h264_decoder = None
         self.h264_decoder = await asyncio.to_thread(create_h264_decoder, data)
@@ -134,6 +163,8 @@ class DeviceControlHandle:
             raise RuntimeError("创建 H.264 解码器失败")
         self.screen_width = self.h264_decoder.width
         self.screen_height = self.h264_decoder.height
+        if self.recording.active is not None:
+            await self.h264_decoder.set_recording(self.recording.active)
 
     async def process_video_upstream(self) -> None:
         reason = "视频流 EOF"
@@ -146,6 +177,8 @@ class DeviceControlHandle:
                 header, data = await asyncio.wait_for(
                     self._read_packet(first), self.options.io_timeout
                 )
+                if not header.config_flag:
+                    self.recording.observe_pts(header.pts)
                 async with self._mutex:
                     if not self.running:
                         break
@@ -171,6 +204,17 @@ class DeviceControlHandle:
             self._stop(reason)
             self._ready.set()
 
+    async def process_audio_upstream(self) -> None:
+        try:
+            await self.audio_stream.run()
+            # The explicit disabled-stream header is not an unexpected EOF.
+            logger.warning("scrcpy 已禁用本会话音频，保留视频和控制连接")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.recording.fail(error)
+            self._stop(f"音频接收失败：{error!r}")
+
     async def process_control_upstream(self) -> None:
         reason = "控制流 EOF"
         try:
@@ -186,6 +230,7 @@ class DeviceControlHandle:
             self._stop(reason)
 
     def _stop(self, reason: str) -> None:
+        self.recording.freeze_end()
         self.running = False
         self._stopped.set()
         if self._close_task is None:
@@ -199,9 +244,10 @@ class DeviceControlHandle:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            writers = [self.video_socket_writer, self.control_socket_writer]
+            writers = [self.video_socket_writer, self.audio_socket_writer, self.control_socket_writer]
             self.video_socket_writer = self.control_socket_writer = None
             self.video_socket_reader = self.control_socket_reader = None
+            self.audio_socket_writer = self.audio_socket_reader = None
             results = await asyncio.gather(
                 *(
                     close_writer(writer, self.options.close_timeout)
@@ -213,6 +259,10 @@ class DeviceControlHandle:
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning(f"关闭流失败：{result!r}")
+            try:
+                await self.recording.stop()
+            except Exception as error:
+                logger.warning(f"结束录制失败：{error!r}")
             async with self._mutex:
                 if self.h264_decoder is not None:
                     await self.h264_decoder.close_decoder()

@@ -33,8 +33,8 @@ options = ConnectionOptions(
 
 | 参数 | 覆盖范围 |
 | --- | --- |
-| `connect_timeout` | 取得设备锁后的单次连接预算，含 TCP 设备连接、推送、启动、隧道及元数据；取消清理可能额外耗时 |
-| `io_timeout` | 单条隧道建连与完整 ADB 握手、视频元数据、已开始的视频包、控制流 drain、存活探测；也用于 TCP 设备的 adb connect |
+| `connect_timeout` | 取得设备锁后的单次连接预算，含 TCP 设备连接、API 级别查询、推送、启动、隧道及媒体配置；取消清理可能额外耗时 |
+| `io_timeout` | 单条隧道建连与完整 ADB 握手、视频元数据、音频头/初始 AAC 配置、已开始的媒体包、控制流 drain、API 级别查询及存活探测；也用于 TCP 设备的 adb connect |
 | `close_timeout` | 单条流关闭、服务端子进程回收、TCP transport 断开等待；不是整个原生清理的总时限 |
 | `probe_interval` | 上次探测结束后到下一次探测的等待时间 |
 | `probe_failures` | 连续探测失败阈值；成功一次将计数归零 |
@@ -62,7 +62,7 @@ class AndroidDevice:
 
 | 签名或属性 | 语义 |
 | --- | --- |
-| `async def connect() -> bool` | 两条流及有效视频元数据就绪后返回 True；失败/超时后清理并返回 False；取消先清理再传播 |
+| `async def connect() -> bool` | 视频/控制流和有效视频元数据就绪后返回 True；启用音频时还等待音频流和初始 AAC 配置或明确的禁用状态；失败/超时后清理并返回 False；取消先清理再传播 |
 | `async def disconnect() -> None` | 幂等关闭，等待会话资源回收；没有会话时安全返回 |
 | `is_connected: bool`（只读属性） | 读取当前流与进程状态，不进行主动网络探测，也不表示已产生首帧 |
 | `last_disconnect_reason: str \| None` | 最近结束会话的首次断连原因；开始新连接时重置为 None |
@@ -108,6 +108,37 @@ jpeg = await device.get_screenshot_jpg(
 ```
 
 内部原始帧接口返回 `(width, height, bgra_bytes)`，像素按 B、G、R、A 排列，长度为 `width * height * 4`。它仍位于内部控制句柄/解码器层，没有新增顶层 BGRA8 API。NumPy/OpenCV 用法见 [BGRA8 消费说明](control-flow.md#bgra8-到-opencv-的消费方式)。
+
+### 屏幕录制
+
+```python
+async def start_recording(output_file: str) -> None: ...
+async def stop_recording() -> None: ...
+```
+
+这两个方法属于 `AndroidDevice`。`start_recording()` 成功表示已创建录制并生成首个 H.264 关键帧；首帧取自当前已解码画面，无需等待手机产生新帧或新 I 帧。没有已解码画面时抛出 `RuntimeError`，连接成功本身不保证首帧已到。每个设备只允许一个活动录制，重复开始抛出 `RuntimeError`。
+
+`output_file` 必须为非空、无 NUL 的字符串。不根据后缀猜容器，输出始终为 MP4；不覆盖已有文件，不创建父目录。路径类型错误抛出 `TypeError`，空路径/NUL 抛出 `ValueError`；文件和编码器错误抛出 `OSError` 或 `RuntimeError`。`stop_recording()` 返回后文件才完成封装，运行期间不保证可供播放器打开。
+
+视频从 NV12 直接经 VideoToolbox 硬件编码为 H.264，码率、画质、编码 Profile 和关键帧间隔采用系统默认设置，不启用牺牲画质的速度优先提示；保留实时编码、预期帧率和禁止帧重排配置。实际码率和文件大小随系统、尺寸和画面内容变化。输出画布使用首帧尺寸；旋转后的画面原生等比适配、居中留黑。编码队列有界，过载可能丢弃中间视频帧；不影响原始 BGRA8/JPEG 获取路径。停止会补齐缓存尾帧的持续时间，即使整段录制没有新视频包也能生成文件。
+
+AAC 包直接封装，不解码/重新编码音频。音视频共用设备 PTS，开始时间通过媒体 PTS 与本机单调时钟映射确定，不使用久未变化的视频 PTS 充当当前时间。音频以完整 AAC 包为边界，48 kHz 下 1024 个采样约为 21.3 ms；不承诺采样级裁剪或跨设备硬实时同步。
+
+一包以内的音频时间戳抖动按连续采样时钟处理；超过一包的向前跳变保留静默区间。这类文件在停止时通过 macOS 原生接口修正 MP4 时间线，使用同目录临时副本并在成功后原子替换，不重新编码音视频；停止所需时间和临时磁盘空间会增加。时间戳向后重叠超过一包，或一份录制超过 4096 个间隔时报告错误。
+
+| Android API 级别 | 连接时的音频行为 |
+| --- | --- |
+| >= 33（Android 13+） | `audio_source=playback audio_dup=true`，保留手机应用声音 |
+| 30–32（Android 11–12L） | `audio_source=output audio_dup=false`，手机静音；Android 11 启动时需要解锁 |
+| < 30 | 音频关闭，录制只含视频 |
+
+API 查询失败使连接失败，不猜测版本。音频从连接时开始采集并持续消费，与是否正在录制无关；Android 11–12L 的静音也从连接时开始。服务端用禁用标记明确告知音频不可用时仍保留视频和控制，录制会记录警告并输出纯视频。不承诺应用禁止采集时仍能取得声音。[scrcpy 3.2 音频契约](https://github.com/Genymobile/scrcpy/blob/v3.2/doc/audio.md)
+
+成功停止后重复调用无操作。断连自动停止录制；自动收尾/异步写入的错误保留在最近的录制上，后续 `stop_recording()` 仍会报告该错误。音频流异常 EOF、非法数据和半包超时会触发会话清理，尽力完成已收到的媒体。新录制可以在旧录制停止后创建，不会因正常停止而关闭设备连接。
+
+停止信号之后，音频流继续消费，但不再进入录制；文件收尾不会阻塞仍连接设备的音频接收。已排队、时间晚于停止边界的视频也不会延长文件的播放时长。
+
+取消开始时，会等待原生创建和结果安装，再结束已创建的录制；不会遗留活动录制，但可能留下已经完成收尾的短文件。取消停止时仍等待在途操作及 MP4 完成，再传播 `CancelledError`。磁盘或系统错误仍可能导致不可播放的部分文件；库不会把文件存在当作录制成功。
 
 ### 应用和控制
 

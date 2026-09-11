@@ -1,6 +1,7 @@
 #include "jpg_encoder.h"
 #include "frame_jpg_encoder.h"
 #include "vtb_decoder.h"
+#include "recording.h"
 #include <Python.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -312,6 +313,151 @@ static PyObject *get_current_frame_jpg(PyObject *self, PyObject *args) {
   return result;
 }
 
+static const vtb_frame_observer_t recording_observer = {
+    .retain = recording_retain,
+    .release = recording_release,
+    .submit = recording_submit_frame};
+
+static void release_recording_handle(PyObject *capsule) {
+  recording_t *recording = PyCapsule_GetPointer(capsule,
+                                               "_adb_scr_media.RecordingHandle");
+  char error[512] = {0};
+  Py_BEGIN_ALLOW_THREADS
+  recording_stop(recording, INT64_MIN, error);
+  recording_release(recording);
+  Py_END_ALLOW_THREADS
+}
+
+static PyObject *start_recording(PyObject *self, PyObject *args) {
+  (void)self;
+  PyObject *capsule, *config;
+  const char *path;
+  long long source_pts;
+  int fps;
+  if (!PyArg_ParseTuple(args, "OsOLi", &capsule, &path, &config, &source_pts, &fps)) {
+    return NULL;
+  }
+  if (fps < 1 || fps > 240 || source_pts < 0) {
+    PyErr_SetString(PyExc_ValueError, "recording requires nonnegative PTS and fps 1..240");
+    return NULL;
+  }
+  decoder_handle_t *handle = PyCapsule_GetPointer(capsule,
+                                                 "_adb_scr_media.DecoderHandle");
+  if (handle == NULL) {
+    return NULL;
+  }
+  char *config_data = NULL;
+  Py_ssize_t config_size = 0;
+  if (config != Py_None && PyBytes_AsStringAndSize(config, &config_data, &config_size) < 0) {
+    return NULL;
+  }
+  char error[512] = {0};
+  recording_t *recording = NULL;
+  Py_BEGIN_ALLOW_THREADS
+  pthread_mutex_lock(&handle->mutex);
+  CVPixelBufferRef frame = vtb_copy_current_frame(handle->decoder);
+  if (frame == NULL) {
+    snprintf(error, sizeof(error), "no decoded frame available for recording");
+  } else {
+    recording = recording_create(frame, path, (const uint8_t *)config_data,
+                                  config_size, source_pts, fps, error);
+    CVPixelBufferRelease(frame);
+    if (recording != NULL) {
+      vtb_set_frame_observer(handle->decoder, recording, recording_observer);
+    }
+  }
+  pthread_mutex_unlock(&handle->mutex);
+  Py_END_ALLOW_THREADS
+  if (recording == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, error);
+    return NULL;
+  }
+  return PyCapsule_New(recording, "_adb_scr_media.RecordingHandle",
+                        release_recording_handle);
+}
+
+static PyObject *set_decoder_recording(PyObject *self, PyObject *args) {
+  (void)self;
+  PyObject *capsule, *recording_capsule;
+  if (!PyArg_ParseTuple(args, "OO", &capsule, &recording_capsule)) {
+    return NULL;
+  }
+  decoder_handle_t *handle = PyCapsule_GetPointer(capsule,
+                                                 "_adb_scr_media.DecoderHandle");
+  if (handle == NULL) {
+    return NULL;
+  }
+  recording_t *recording = NULL;
+  if (recording_capsule != Py_None) {
+    recording = PyCapsule_GetPointer(recording_capsule, "_adb_scr_media.RecordingHandle");
+    if (recording == NULL) {
+      return NULL;
+    }
+  }
+  bool success;
+  Py_BEGIN_ALLOW_THREADS
+  pthread_mutex_lock(&handle->mutex);
+  success = vtb_set_frame_observer(handle->decoder, recording, recording_observer);
+  pthread_mutex_unlock(&handle->mutex);
+  Py_END_ALLOW_THREADS
+  if (!success) {
+    PyErr_SetString(PyExc_RuntimeError, "cannot attach recording to closed decoder");
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
+static PyObject *append_recording_audio(PyObject *self, PyObject *args) {
+  (void)self;
+  PyObject *capsule, *packet;
+  long long pts;
+  if (!PyArg_ParseTuple(args, "OO!L", &capsule, &PyBytes_Type, &packet, &pts)) {
+    return NULL;
+  }
+  recording_t *recording = PyCapsule_GetPointer(capsule,
+                                               "_adb_scr_media.RecordingHandle");
+  if (recording == NULL) {
+    return NULL;
+  }
+  char *data;
+  Py_ssize_t size;
+  PyBytes_AsStringAndSize(packet, &data, &size);
+  char error[512] = {0};
+  bool success;
+  Py_BEGIN_ALLOW_THREADS
+  success = recording_append_audio(recording, (const uint8_t *)data, size, pts, error);
+  Py_END_ALLOW_THREADS
+  if (!success) {
+    PyErr_SetString(PyExc_RuntimeError, error);
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
+static PyObject *stop_recording(PyObject *self, PyObject *args) {
+  (void)self;
+  PyObject *capsule;
+  long long end_pts;
+  if (!PyArg_ParseTuple(args, "OL", &capsule, &end_pts)) {
+    return NULL;
+  }
+  recording_t *recording = PyCapsule_GetPointer(capsule,
+                                               "_adb_scr_media.RecordingHandle");
+  if (recording == NULL) {
+    return NULL;
+  }
+  char error[512] = {0};
+  bool success;
+  Py_BEGIN_ALLOW_THREADS
+  success = recording_stop(recording, end_pts, error);
+  Py_END_ALLOW_THREADS
+  if (!success) {
+    PyErr_SetString(PyExc_RuntimeError, error);
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef MediaExtMethods[] = {
     {"bgra8_to_jpg", bgra8_to_jpg, METH_VARARGS, NULL},
     {"create_decoder", create_decoder, METH_VARARGS, NULL},
@@ -319,6 +465,10 @@ static PyMethodDef MediaExtMethods[] = {
     {"enqueue_frame", enqueue_frame, METH_VARARGS, NULL},
     {"get_current_frame_bgra8", get_current_frame_bgra8, METH_VARARGS, NULL},
     {"get_current_frame_jpg", get_current_frame_jpg, METH_VARARGS, NULL},
+    {"start_recording", start_recording, METH_VARARGS, NULL},
+    {"set_decoder_recording", set_decoder_recording, METH_VARARGS, NULL},
+    {"append_recording_audio", append_recording_audio, METH_VARARGS, NULL},
+    {"stop_recording", stop_recording, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
 
 static struct PyModuleDef adb_scr_media_module = {PyModuleDef_HEAD_INIT,

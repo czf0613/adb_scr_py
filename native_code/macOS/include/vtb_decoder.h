@@ -54,4 +54,13 @@ bool vtb_current_frame_bgra8(void *decoder, uint8_t **out_data,
 // Caller owns the retained snapshot and must release it after use.
 CVPixelBufferRef vtb_copy_current_frame(void *decoder);
 
+// The decoder owns one retained observer; callbacks never wait on its queue.
+typedef struct {
+  void (*retain)(void *context);
+  void (*release)(void *context);
+  void (*submit)(void *context, CVPixelBufferRef frame, int64_t pts);
+} vtb_frame_observer_t;
+bool vtb_set_frame_observer(void *decoder, void *context,
+                             vtb_frame_observer_t observer);
+
 #endif

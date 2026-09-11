@@ -7,7 +7,7 @@ from collections.abc import Awaitable
 from typing import TYPE_CHECKING, final
 
 from .. import consts
-from ..adb_cmd.base import adb_connect, adb_device_cmd, adb_disconnect
+from ..adb_cmd.base import adb_android_api_level, adb_connect, adb_device_cmd, adb_disconnect
 from ..adb_cmd.device_control import (
     launch_app,
     push_file,
@@ -72,6 +72,7 @@ class AndroidDevice:
         self.scid = f"{random_int:08x}"
         self.scrcpy_server_process = None
         self._mutex = Lock()
+        self._last_recording = None
 
     @property
     def is_connected(self) -> bool:
@@ -111,7 +112,8 @@ class AndroidDevice:
             asyncio.CancelledError: 调用被取消，已取得的会话资源会先被回收。
 
         Notes:
-            调用前必须完成 init_lib()。返回 True 表示两条流和屏幕尺寸已就绪，
+            调用前必须完成 init_lib()。返回 True 表示所需流和屏幕尺寸已就绪，
+            音频开启时还确认 AAC 配置或服务端明确禁用音频。
             不保证已有解码帧。连接预算从取得设备锁后开始，清理可额外耗时。
             不自动重连。
         """
@@ -143,15 +145,25 @@ class AndroidDevice:
             self._tcp_owned = True
             if await adb_connect(self.serial, timeout=self.options.io_timeout) != 0:
                 raise ConnectionError("ADB 网络连接失败")
+        android_api_level = await adb_android_api_level(
+            self.serial, timeout=self.options.io_timeout
+        )
+        audio_source = (
+            "playback + audio_dup" if android_api_level >= 33
+            else "output" if android_api_level >= 30 else "音频关闭"
+        )
+        logger.info(f"Android API {android_api_level}：{audio_source}")
         if not await push_file(
             self.serial, consts.SCRCPY_SERVER_PATH, consts.SCRCPY_PATH_ON_DEVICE
         ):
             raise ConnectionError("推送 scrcpy server 失败")
-        self.scrcpy_server_process = await start_scrcpy_server(self.serial, self.scid)
+        self.scrcpy_server_process = await start_scrcpy_server(
+            self.serial, self.scid, android_api_level=android_api_level
+        )
         if self.scrcpy_server_process is None:
             raise ConnectionError("启动 scrcpy server 失败")
         self.control_handle = DeviceControlHandle(
-            self.serial, self.scid, options=self.options
+            self.serial, self.scid, options=self.options, audio_enabled=android_api_level >= 30
         )
         if not await self.control_handle.connect_sockets():
             raise ConnectionError(self.control_handle.disconnect_reason)
@@ -249,6 +261,39 @@ class AndroidDevice:
             self.control_handle._stop("主动断开")
         async with self._mutex:
             await complete_on_cancel(self._disconnect_locked("主动断开"))
+
+    async def start_recording(self, output_file: str) -> None:
+        """从最新已解码帧开始录制 H.264/AAC MP4。
+
+        Args:
+            output_file: 新文件路径；不覆盖已有文件，不创建父目录。
+
+        Raises:
+            RuntimeError: 未连接、无解码帧、重复开始或原生编码失败。
+            OSError: 输出文件无法创建或写入。
+            TypeError: 路径不是字符串。
+            ValueError: 路径为空或包含 NUL。
+            asyncio.CancelledError: 已创建的录制结束并释放后传播取消。
+
+        Notes:
+            音频不可用时记录警告并生成纯视频文件。首帧使用当前画面，
+            无需等待下一帧或手机关键帧。音频按 AAC 包边界裁剪。
+        """
+        handle = self.control_handle
+        if not self.is_connected or handle is None:
+            raise RuntimeError("设备未连接，无法开始录制")
+        self._last_recording = handle.recording
+        await handle.recording.start(output_file)
+
+    async def stop_recording(self) -> None:
+        """停止本设备最近的录制，等待 MP4 完整封装；重复调用安全。
+
+        Notes:
+            断连会自动结束录制。异步写入或自动结束的错误仍由本方法
+            报告；成功结束后重复调用无操作。取消时等待在途清理完成。
+        """
+        if self._last_recording is not None:
+            await self._last_recording.stop()
 
     async def launch_app(self, package_name: str, activity_name: str) -> bool:
         """启动设备上的应用

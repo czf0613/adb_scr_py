@@ -5,6 +5,7 @@ from adb_scr.exceptions import AdbScrPyH264DecoderException
 from adb_scr.logger import logger
 
 from ...async_utils import complete_on_cancel
+from .. import _adb_scr_media as _media
 from .._adb_scr_media import (
     create_decoder,
     destroy_decoder,
@@ -13,6 +14,9 @@ from .._adb_scr_media import (
     get_current_frame_jpg,
 )
 from .decoder_base import H264DecoderBase
+
+if TYPE_CHECKING:
+    from .._adb_scr_media import RecordingHandle
 
 __all__ = []
 
@@ -90,4 +94,19 @@ class VtbH264Decoder(H264DecoderBase):
             return None
         return await complete_on_cancel(
             asyncio.to_thread(get_current_frame_jpg, self.handle, quality, scale, roi)
+        )
+
+    async def start_recording(
+        self, output_file: str, audio_config: bytes | None, source_pts: int, fps: int
+    ) -> "RecordingHandle":
+        if not self.valid:
+            raise RuntimeError("解码器已关闭")
+        # The controller shields result installation, not only this worker.
+        return await asyncio.to_thread(
+            _media.start_recording, self.handle, output_file, audio_config, source_pts, fps
+        )
+
+    async def set_recording(self, recording: "RecordingHandle | None") -> None:
+        await complete_on_cancel(
+            asyncio.to_thread(_media.set_decoder_recording, self.handle, recording)
         )

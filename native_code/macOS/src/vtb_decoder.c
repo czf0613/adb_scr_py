@@ -16,6 +16,8 @@ typedef struct {
   VTDecompressionSessionRef session;
   CVPixelBufferRef current_frame;
   dispatch_queue_t queue;
+  void *observer_context;
+  vtb_frame_observer_t observer;
 } vtb_decoder_t;
 
 int32_t vtb_create_decoder(const uint8_t *sps_and_pps, size_t sps_and_pps_size,
@@ -93,7 +95,7 @@ int32_t vtb_create_decoder(const uint8_t *sps_and_pps, size_t sps_and_pps_size,
                        kCFBooleanTrue);
 
   // 创建对象准备返回
-  vtb_decoder_t *vtb_decoder = malloc(sizeof(vtb_decoder_t));
+  vtb_decoder_t *vtb_decoder = calloc(1, sizeof(vtb_decoder_t));
   vtb_decoder->format = format;
   vtb_decoder->session = session;
   vtb_decoder->current_frame = NULL;
@@ -117,6 +119,10 @@ void vtb_destroy_decoder(void **decoder) {
 
   // VideoToolbox callbacks have returned, but their queued blocks may remain.
   dispatch_sync(vtb_decoder->queue, ^{
+    if (vtb_decoder->observer_context != NULL) {
+      vtb_decoder->observer.release(vtb_decoder->observer_context);
+      vtb_decoder->observer_context = NULL;
+    }
     if (vtb_decoder->current_frame != NULL) {
       CVPixelBufferRelease(vtb_decoder->current_frame);
       vtb_decoder->current_frame = NULL;
@@ -186,6 +192,12 @@ bool vtb_enqueue_frame(void *decoder, const uint8_t *frame, size_t frame_size,
           }
 
           vtb_decoder->current_frame = retainedBuffer;
+          if (vtb_decoder->observer_context != NULL) {
+            int64_t pts_us = CMTimeConvertScale(presentationTimeStamp, 1000000,
+                                               kCMTimeRoundingMethod_Default).value;
+            vtb_decoder->observer.submit(vtb_decoder->observer_context,
+                                         retainedBuffer, pts_us);
+          }
         });
       });
 
@@ -235,4 +247,23 @@ CVPixelBufferRef vtb_copy_current_frame(void *decoder) {
     }
   });
   return frame;
+}
+
+bool vtb_set_frame_observer(void *decoder, void *context,
+                             vtb_frame_observer_t observer) {
+  if (decoder == NULL) {
+    return context == NULL;
+  }
+  vtb_decoder_t *inner = decoder;
+  dispatch_sync(inner->queue, ^{
+    if (context != NULL) {
+      observer.retain(context);
+    }
+    if (inner->observer_context != NULL) {
+      inner->observer.release(inner->observer_context);
+    }
+    inner->observer_context = context;
+    inner->observer = observer;
+  });
+  return true;
 }

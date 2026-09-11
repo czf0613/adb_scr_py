@@ -24,7 +24,7 @@ flowchart LR
 
 「频繁取帧」是设计目标，不是已经测得的固定帧率保证。当前还存在像素分配/复制和 Python 层的解码器锁，不能将 JPEG 接口的使用建议、测试脚本的采样周期直接当作 BGRA8 通路的性能上限。
 
-## 从推送服务端到建立两条连接
+## 从推送服务端到建立媒体与控制连接
 
 前置条件是已经执行 `init_lib()`：本机 ADB daemon 已启动，包内 `scrcpy-server.bin` 已释放到本机临时目录。对于 TCP 设备，`AndroidDevice.connect()` 还会先执行 `adb connect IP:端口`；USB 设备直接使用已有 transport。
 
@@ -32,9 +32,9 @@ flowchart LR
 
 [`AndroidDevice.connect()`](../src/adb_scr/device/android_device.py) 先等待 `adb push` 完成，将 scrcpy 服务端载荷写到手机 `/data/local/tmp/scrcpy-server.jar`。项目资源名为 `.bin`，手机端使用 `.jar` 路径，运行的是 scrcpy 的 Java/DEX 服务端入口。
 
-[`start_scrcpy_server()`](../src/adb_scr/adb_cmd/device_control.py) 再通过 ADB shell 设置 `CLASSPATH`，用 `app_process / com.genymobile.scrcpy.Server` 启动进程。参数包括版本 `3.2`、每会话的 `scid`、`tunnel_forward=true`、`video=true`、`video_codec=h264`、`audio=false` 和 `control=true`。
+[`start_scrcpy_server()`](../src/adb_scr/adb_cmd/device_control.py) 再通过 ADB shell 设置 `CLASSPATH`，用 `app_process / com.genymobile.scrcpy.Server` 启动进程。参数包括版本 `3.2`、每会话的 `scid`、`tunnel_forward=true`、`video=true`、`video_codec=h264`、`control=true`，以及按 Android API 级别选择的音频参数。连接先通过 `getprop ro.build.version.sdk` 查询系统版本：API >= 33 使用 `audio=true audio_codec=aac audio_source=playback audio_dup=true`，30–32 使用 AAC/output 且不保留手机播放，低于 30 使用 `audio=false`。版本读取失败会触发连接回滚。
 
-在 forward 模式下，手机上的 scrcpy 创建并监听名为 `scrcpy_SCID` 的 abstract Unix domain socket，等待主机方向发起连接。scrcpy 3.2 的 [DesktopConnection.open()](https://github.com/Genymobile/scrcpy/blob/v3.2/server/src/main/java/com/genymobile/scrcpy/device/DesktopConnection.java) 按视频、音频、控制的启用顺序执行 `accept()`；本库关闭音频，因此需要依次接入视频和控制两条连接。
+在 forward 模式下，手机上的 scrcpy 创建并监听名为 `scrcpy_SCID` 的 abstract Unix domain socket，等待主机方向发起连接。scrcpy 3.2 的 [DesktopConnection.open()](https://github.com/Genymobile/scrcpy/blob/v3.2/server/src/main/java/com/genymobile/scrcpy/device/DesktopConnection.java) 按视频、音频、控制的启用顺序执行 `accept()`；本库按同样的顺序接入启用的流；音频关闭时才只接视频和控制。
 
 ### 2. 通过 ADB 将本机 TCP 流接到手机 UDS
 
@@ -47,7 +47,7 @@ flowchart LR
 
 每条 ADB 命令使用「4 位十六进制长度 + 命令字符串」封装。这里没有额外调用 `adb forward tcp:某端口 localabstract:...` 建立独立的本机监听端口；Python 是先连接 5037，再在连接内完成选设备和接 UDS 的请求。
 
-`connect_sockets()` 按相同流程打开两次连接，分别保存为视频流和控制流。两次目标 UDS 名称相同，流用途由 scrcpy 的接入顺序决定。两条流均取得后才设置运行状态并启动接收任务，避免接收任务先退出、连接函数再将状态写回运行。
+`connect_sockets()` 按相同流程依次连接视频、可选音频和控制。目标 UDS 名称相同，流用途由 scrcpy 的接入顺序决定。所需流全部取得后才设置运行状态并启动接收任务，避免接收任务先退出、连接函数再将状态写回运行。音频启动时必须读取四字节编码器 ID 与 AAC 配置；ID 为 0 时表示服务端明确关闭音频，不误当作控制流或整个连接故障。
 
 ```mermaid
 sequenceDiagram
@@ -60,7 +60,7 @@ sequenceDiagram
     P->>A: adb shell / app_process 启动服务端
     A->>S: 启动 scrcpy，监听 abstract UDS
     Note over P,S: Python 固定等待 2 秒，检查子进程是否提前退出
-    loop 先视频，再控制
+    loop 先视频，再可选音频，最后控制
         P->>A: TCP 连接 localhost:5037
         P->>A: host:transport:SERIAL
         A-->>P: OKAY
@@ -87,7 +87,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `start_scrcpy_server()` | 固定 `asyncio.sleep(2)` | 源码标注为「等待上线」。从调用顺序看，是给手机进程启动、加载入口并建立 UDS 留缓冲；随后只检查 ADB shell 子进程是否退出，没有探测 UDS 或首帧 ready。2 秒是当前实现的缓冲值，不是 scrcpy 协议规定的时长。 |
 | `connect()` 返回后首次取尺寸/图像 | 已等待有效元数据，但尚未保证首帧 | 取尺寸不再依赖固定 sleep；首帧由调用方在截止时间内检查。 |
-| `disconnect_sockets()` | 取消并等待接收任务、关闭流、关闭解码器 | 旧实现两处 0.5 秒缓冲已经替换为实际完成等待；固定时间不能证明资源已停止使用。 |
+| `disconnect_sockets()` | 取消并等待接收任务、关闭流、结束录制、关闭解码器 | 旧实现两处 0.5 秒缓冲已经替换为实际完成等待；固定时间不能证明资源已停止使用。 |
 | `get_current_frame_bgra8()` | `dispatch_sync`，没有固定秒数 | 等待解码器串行队列轮到取帧，并在队列内完成 NV12 → BGRA8。耗时取决于队列工作和像素转换。 |
 | `get_current_frame_jpg()` | 队列内 retain 快照，队列外等待编码 | 原生句柄锁保护编码器及关闭；VideoToolbox 等待输出回调或 Core Image 完成 JPEG 输出后返回。 |
 | `destroy_decoder()` | VideoToolbox 完成等待，再同步排空 GCD 队列 | 先确保没有新的回调提交，再确认已提交的帧替换结束并释放最终帧；没有强制销毁超时。[Apple API 说明](https://developer.apple.com/documentation/videotoolbox/vtdecompressionsessionwaitforasynchronousframes(_:))。 |
@@ -187,10 +187,25 @@ JPEG 编码器属于 Capsule，由原生句柄锁保护，关闭时完成编码�
 
 ## 后续 Agent 应保留的设计约束
 
-- 保持视频、控制两次 UDS 接入的顺序与 scrcpy 配置一致；启用音频时需要重新核对连接协议。
+- 保持视频、可选音频、控制的 UDS 接入顺序与 scrcpy 配置一致；三条流数量和服务端参数必须来自同一次 API 级别判定。
 - 区分隧道接通、元数据到达、解码器建立和首帧就绪；固定延时只为阶段间留缓冲。
 - 保留原始 BGRA8 消费路径，让 JPEG 编码继续作为可选步骤。
 - 修改 GCD 读写方式时同时检查引用所有权、销毁顺序与 Python 锁；不得仅以「使用了串行队列」推断所有并发路径安全。
 - 描述性能时区分硬件 H.264 解码、CPU 向量像素转换、工作线程调度、数据复制和取帧频率；具体吞吐需要单独测量。
 
 本文件与其他 `docs/` 内容一样，仅保留在仓库中，按 `MANIFEST.in` 的 `prune docs` 规则排除出发布包。
+
+
+## 屏幕录制与静止画面
+
+视频录制订阅 VideoToolbox 输出的 NV12 CVPixelBuffer。首帧直接使用现有缓存快照，由独立硬件 H.264 session 强制生成关键帧；不等待上游 IDR，也不走 BGRA8/Python/JPEG 转换。后续画面通过原生观察者 retain 后提交到录制队列。观察者仅提交工作，不在解码器帧队列内等待编码或磁盘写入。
+
+录制保留实时编码、预期帧率、禁止帧重排和色彩描述；码率、画质、编码 Profile 与关键帧间隔使用 VideoToolbox 默认值，不设置速度优先提示。此前的 256 kbps 目标码率会使高分辨率画面明显模糊，因此根据真机反馈移除；不保证跨设备相同画质或码率。输出画布固定为开始时尺寸，尺寸变化由原生 Core Image 路径等比适配并居中留黑，原尺寸画面保留直接输入路径。AAC AudioSpecificConfig 与原始压缩包交由 CoreMedia/AVAssetWriter 封装，AudioToolbox 仅参与格式描述，不解码或重新编码音频。
+
+AAC 直通需要显式处理 AVAssetWriter 的 encoder-delay 元数据，不能只给首包设置零裁剪。原生层为开头的包组提供 priming/输出时间，并在结束时用压缩包填充和尾部裁剪补齐封装器的预填充区间；附加填充位于播放区间之外。连续音频的验证逐包比较原始 AAC 内容与 MP4 包哈希、PTS，并用 AVAssetReader 核对有效音频起止，避免文件能播放但整体偏移 44 ms 的情况。
+
+AVAssetWriter 的 AAC 直通会按连续采样时钟写包，不能依靠逐包 PTS 或 EmptyMedia marker 自动保留间隔。原生层允许一包以内的时间抖动，记录超过一包的向前跳变；结束后仅为有间隔的文件建立临时副本，用 AVMutableMovieTrack 插入空白时间段，再以 MPEG-4 格式写入头部并原子替换。视频和 AAC 数据保持压缩内容不变。movie timescale 使用 1,000,000，避免多段空白累计按默认 600 刻度取整。间隔元数据最多 4096 项；超过上限或向后重叠超过一包会报告失败。带间隔的音轨可能含解码预填充引用，验证必须结合原始包存储和 Apple 播放时间区间，不能把预填充引用误判成可听见的重复声音。
+
+录制器独立持有缓存画面。没有画面更新时不要求手机发送重复帧；停止时使用保留的尾帧补齐持续时间，并等待 VideoToolbox 和 MP4 writer 完成。编码队列有界，繁忙时可以跳过中间视频帧，但不能静默丢弃音频后谎报成功。原生层在停止后拒绝新提交，观察者解绑、异步工作和最终资源释放都必须遵循引用所有权。
+
+手机端音频采集从连接时就开始。Android 13+ 的 playback + audio_dup 保留手机播放，Android 11–12L 的 output 会使手机静音；后者的停止录制仅停止写文件，不会关闭整个会话或恢复音频路由。音频不可用的旧系统仍可录制纯视频。应用是否允许采集以及设备 ROM 的实际表现需要真机验证。

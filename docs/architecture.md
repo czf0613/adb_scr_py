@@ -6,7 +6,7 @@
 
 `adb_scr_py` 的 Python 导入名为 `adb_scr`，通过 ADB 和 scrcpy 3.2 控制 Android 并接收 H.264 视频。最低支持 Python 3.10，默认开发版本为 3.14。原生媒体实现仅支持 macOS，并要求 VideoToolbox 硬件解码。
 
-库缓存最新 NV12 解码帧，按需用 Accelerate/vImage 转成 BGRA8，服务于高频 NumPy/OpenCV 图像处理。顶层 `AndroidDevice.get_screenshot_jpg()` 直接从 CVPixelBuffer 编码 JPEG，支持质量、缩放比例及原图 ROI；调用者无需选择底层编码路径。内部控制句柄仍可返回原始 BGRA8 bytes，原生 `bgra8_to_jpg()` 工具函数也继续保留。没有历史帧队列、视频录制或自动重连。
+库缓存最新 NV12 解码帧，按需用 Accelerate/vImage 转成 BGRA8，服务于高频 NumPy/OpenCV 图像处理。顶层 `AndroidDevice.get_screenshot_jpg()` 直接从 CVPixelBuffer 编码 JPEG，支持质量、缩放比例及原图 ROI；调用者无需选择底层编码路径。内部控制句柄仍可返回原始 BGRA8 bytes，原生 `bgra8_to_jpg()` 工具函数也继续保留。没有历史帧队列或自动重连。屏幕录制订阅同一原生 NV12 帧，独立使用 VideoToolbox 编码 H.264，并将 scrcpy 回传的 AAC 直接封装进 MP4。
 
 ## 模块与数据流
 
@@ -19,7 +19,7 @@ flowchart TD
     Tunnel --> ADB[localhost:5037 / ADB daemon]
     Cmd --> ADB
     ADB --> Phone[Android / scrcpy-server]
-    Phone -->|H.264| Handle
+    Phone -->|H.264 / AAC| Handle
     Handle -->|控制消息| Phone
     Handle --> Decoder[VtbH264Decoder]
     Decoder --> Native[Capsule 容器 / VideoToolbox / GCD]
@@ -29,6 +29,9 @@ flowchart TD
     Native --> Snapshot[retain 最新 NV12 快照]
     Snapshot --> Direct[VideoToolbox 硬件 JPEG / Core Image]
     Direct --> Bytes[JPEG bytes]
+    Native --> Recorder[原生帧订阅 / H.264 重编码]
+    Handle -->|原始 AAC 包| Mux[AVAssetWriter / MP4]
+    Recorder --> Mux
 ```
 
 | 文件 | 职责 |
@@ -40,13 +43,16 @@ flowchart TD
 | `adb_cmd/device_control.py` | 推送、应用命令、启动并转交 scrcpy 进程所有权 |
 | `device/options.py` | 不可变、经验证的公开 `ConnectionOptions` |
 | `device/android_device.py` | 连接、回滚、会话监控、断连通知、显式重连、截图和手势 |
-| `device/control_handle.py` | 两条流、接收任务、视频协议、解码器替换、控制发送、幂等关闭 |
+| `device/control_handle.py` | 视频/可选音频/控制流、接收任务、解码器替换、控制发送、幂等关闭 |
+| `device/audio_stream.py` | scrcpy AAC 编码器头、配置和带 PTS 的包解析；区分禁用和异常断流 |
+| `device/recording.py` | 录制 start/stop/取消所有权、音频入队、PTS/单调时钟映射及错误保存 |
 | `device/tcp_forward_tunnel.py` | 一次有总超时的 TCP + ADB 握手；失败回收流 |
 | `device/types.py` / `bin_utils.py` | 连接/手势类型、整数编码、帧头及随机延时 |
 | `media_ext/h264/` | 同步快速入队、异步取帧/关闭及首个 IDR 约束 |
 | `media_ext/_adb_scr_media.pyi` | 原生公共函数的类型与 docstring；方法表不放 C docstring |
 | `native_code/macOS/src/adb_scr_media.c` | Python/C 转换；稳定 Capsule 容器、句柄锁、析构兜底 |
-| `vtb_decoder.c` | VideoToolbox session、回调、最新帧串行队列及有序销毁 |
+| `vtb_decoder.c` | VideoToolbox session、回调、最新帧串行队列、原生帧观察者及有序销毁 |
+| `recording.m` | 有界媒体提交、H.264 编码、AAC 压缩包封装、尺寸适配和文件收尾 |
 | `vtb_helper.c` | Annex B 处理及 NV12 → BGRA8 转换 |
 | `jpg_encoder.c` | ImageIO/CoreGraphics JPEG 编码 |
 | `frame_jpg_encoder.m` | NV12 直接编码 JPEG；复用硬件会话及 Core Image 上下文，裁剪、缩放和回退 |
@@ -58,10 +64,10 @@ flowchart TD
 每次 `AndroidDevice.connect()` 在设备锁内清理失效会话，再建立新的断连通知对象。一次连接受 `connect_timeout` 预算约束：
 
 1. TCP 设备执行 `adb connect`；USB 设备略过。
-2. 推送服务端到 `/data/local/tmp/scrcpy-server.jar`。
-3. 启动 scrcpy 3.2，配置 H.264、视频/控制开启、音频关闭，保留原有 2 秒启动缓冲。
-4. 保存进程和控制句柄的所有权；按视频、控制顺序连接同一个 `localabstract:scrcpy_SCID`。
-5. 两条流均取得后设置 `running=True` 并启动接收任务，等待视频元数据有效。
+2. 执行 `getprop ro.build.version.sdk` 读取 API 级别，查询失败使连接回滚；推送服务端到 `/data/local/tmp/scrcpy-server.jar`。
+3. 启动 scrcpy 3.2，配置 H.264、视频/控制开启；API >= 33 使用 AAC + playback + audio_dup，30–32 使用 AAC + output，低于 30 关闭音频。保留原有 2 秒启动缓冲。
+4. 保存进程和控制句柄的所有权；按视频、可选音频、控制顺序连接同一个 `localabstract:scrcpy_SCID`。
+5. 所需流全部取得后设置 `running=True` 并启动接收任务；等待有效视频元数据，启用音频时同时等待初始 AAC 配置或明确禁用状态。
 6. 确认进程和流仍有效，启动会话监控，再返回 True。
 
 `connect()` 成功只保证流和有效尺寸就绪，首个解码帧可能稍后到达。普通失败或超时完整回滚后返回 False；取消完成回滚后传播 `CancelledError`。同一实例允许显式再次连接，不自动重连。
@@ -90,7 +96,7 @@ FPS 是下一次启动服务端使用的进程级上限，不影响已运行会�
 
 ## 关闭与取消
 
-控制句柄只创建一个清理任务，首次原因获保留。停止信号立即令 `running=False` 并唤醒手势等待。清理取消并等待接收任务、关闭两条流，在解码器锁内关闭解码器并清零尺寸。关闭流等待超时后 abort transport。
+控制句柄只创建一个清理任务，首次原因获保留。停止信号立即令 `running=False` 并唤醒手势等待。清理取消并等待接收任务、关闭所有流，结束录制并等待 MP4 完成，再在解码器锁内关闭解码器并清零尺寸。关闭流等待超时后 abort transport。
 
 设备监控在发出停止信号后取消并等待其他监控任务（含在途探测命令），再在设备锁内回收控制句柄、scrcpy 进程及本会话使用的 TCP transport。手势等待在停止信号到达时提前结束，不再用长按时长拖延断连清理。已进行的普通 ADB 应用命令仍有自身超时，可能延后锁的取得。
 
@@ -126,7 +132,8 @@ JPEG 直出在 GCD 队列内取得 retain 的帧快照，随后在队列外编�
 | --- | --- |
 | 模块级 asyncio 锁 | 库初始化/反初始化 |
 | 设备 asyncio 锁 | 会话建立/回收、应用命令、指定手势序列 |
-| 控制句柄 asyncio 锁 | 解码器创建/替换、取帧、入队、关闭 |
+| 控制句柄 asyncio 锁 | 解码器创建/替换、取帧、入队、录制订阅切换和关闭 |
+| 录制控制器 asyncio 锁 | start/stop 与 AAC 提交；停止获取解码器锁前先获取此锁 |
 | Capsule 容器原生锁 | 同一原生 decoder 的操作、JPEG 编码器复用与销毁 |
 | 每解码器 GCD 串行队列 | 当前 CVPixelBuffer 的替换、BGRA8 转换、JPEG 快照 retain 及最终释放 |
 
@@ -137,3 +144,18 @@ asyncio 锁只协调同一事件循环中的协程，不是操作系统线程锁
 原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI；普通 3.14 的 `cp314` 与 free-threaded 3.14 的 `cp314t` ABI 需要分别构建，不能混用。本地默认环境仍为普通 3.14；3.10 和 3.14t 在独立临时环境验证，命令见 [Python 兼容性](python-compatibility.md)。本次不新增子解释器支持。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
 
 无设备测试覆盖 EOF/半包/握手超时、部分连接失败、取消、进程退出、显式重连、探测阈值、手势中断、管道排空、原生重复关闭、GCD 排队工作完成及合成 H.264 → BGRA8 → JPEG。free-threaded 验证检查导入和测试结束时 GIL 仍关闭，并覆盖编码线程状态、多线程共享不可变输入、同一句柄读写/关闭、独立解码器及 GC 下的 Capsule 析构。真机 `tests/test_run.py` 仅在明确请求时执行，默认兼容性核查只编译或收集它。
+
+
+## 录制时间与资源边界
+
+`RecordingController` 属于一个控制句柄，原生录制器独立于解码器。录制编码器使用系统默认码率、画质、Profile 和关键帧间隔，保留实时编码、预期帧率和禁止帧重排设置。开始时在解码器锁内取得原生首帧并创建录制；原生观察者由解码器帧队列保存引用。后续 SPS/PPS 到达时，旧解码器先解绑录制、排空和关闭，新解码器创建后再绑定同一录制。原生 recorder 自己保留最新帧，旋转和暂时无新解码帧都不会丢失尾帧。
+
+音频有独立的接收任务和录制锁，不为等待截图而获取解码器锁。首部为四字节 `\0aac`，后续与视频一样使用 12 字节包头；配置包保存 AudioSpecificConfig，媒体包保留原始 AAC bytes 和设备 PTS。单音频包上限 1 MiB。首部和首次配置有超时，之后完整包之间允许静默；已开始的半包必须在 io_timeout 内完成。编码器 ID 0 是服务端明确禁用，仅保留视频/控制；ID 1、非法协议或异常 EOF 关闭会话并回收正在录制的文件。
+
+设备音视频 PTS 共用微秒基准，控制器用收包时的本机单调时钟维护最小观测传输偏移。每次开始冻结同一时间原点，首个缓存视频帧强制从零开始；不把可能已静止数分钟的画面 PTS 当作当前时刻。结束时间在停止请求或断连信号时固定，后续排队和文件关闭时间不延长录制。音频直接按包裁剪，起止精度受 AAC 包时长限制，时钟映射也受实际传输延迟影响。
+
+原生 AAC 直通把一包以内的 PTS 抖动归整到采样时钟；较大的向前跳变作为空白编辑在 MP4 收尾时保留。只有这种情况需要同目录临时文件及 AVMutableMovie 原生头部修正，成功后原子替换目标。音视频压缩内容不重新编码；向后重叠超过一包或超过 4096 个间隔会报告错误。停止标记使 Python 音频消费直接跳过录制锁，因此这一步文件收尾不阻塞仍连接的音频 socket。
+
+开始和停止都保护整个资源所有权操作，包含原生线程返回后的句柄安装以及等待锁的停止任务。取消不会让后台线程继续使用已释放的句柄。正常停止先阻止音频提交，在解码器锁内解绑观察者，再排空原生编码/写入并结束 MP4；decoder 的释放在其后。原生提交必须有界，不能让文件写入反向阻塞解码器帧队列。原生队列/引用和具体编码配置见 control-flow.md。
+
+`AndroidDevice` 保存最近的录制控制器引用，因此自动断连后调用 stop_recording 仍能取得该录制的写入错误。成功的重复停止无操作；新录制重置错误状态。低版本设备或明确禁用音频时允许纯视频录制并记录警告，绝不把音频编解码工作放到 Python。

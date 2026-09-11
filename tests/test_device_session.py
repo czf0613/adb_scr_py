@@ -60,6 +60,8 @@ def install_device_fakes(monkeypatch, *, fail_control=False, process_exit=False)
         return process
 
     monkeypatch.setattr(module, "push_file", AsyncMock(return_value=True))
+    # These existing lifecycle cases exercise the video/control-only branch.
+    monkeypatch.setattr(module, "adb_android_api_level", AsyncMock(return_value=29))
     monkeypatch.setattr(module, "start_scrcpy_server", start)
     monkeypatch.setattr(control_handle, "setup_tunnel", tunnel)
 

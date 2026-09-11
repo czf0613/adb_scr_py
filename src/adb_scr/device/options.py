@@ -12,7 +12,8 @@ class ConnectionOptions:
 
     Args:
         connect_timeout: 单次连接总预算，默认 30 秒，清理可能额外耗时。
-        io_timeout: 握手、半包接收、控制写入及探测的超时，默认 5 秒。
+        io_timeout: 握手、媒体初始配置、半包接收、控制写入及 API 级别
+            查询/探测的超时，默认 5 秒。
         close_timeout: 流关闭、子进程回收的等待上限，默认 5 秒。
         probe_interval: 设备探测间隔，默认 5 秒；None 禁用主动探测。
         probe_failures: 连续失败达到该次数后断开，默认 3 次。
