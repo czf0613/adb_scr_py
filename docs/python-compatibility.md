@@ -10,6 +10,9 @@ Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖
 CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14t 的实际 GIL 状态。
 云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。
 
+预编译发布 wheel 的最低 macOS 标签为 `macosx_15_0_arm64`，覆盖上述六种 Python
+ABI，在 macOS 15 构建后安装到 macOS 26 验证；发布流程见 [发布文档](releasing.md)。
+
 ## 2026-09-11 H.264/AAC 屏幕录制验证
 
 新增 `AndroidDevice.start_recording(output_file)` / `stop_recording()`，连接前

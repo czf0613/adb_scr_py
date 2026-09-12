@@ -51,7 +51,8 @@ Python 仅固定小版本，实际补丁版本由固定的 uv 版本及 runner �
 合成 H.264 解码、JPEG 直出、真实 H.264/AAC 录制、原生句柄并发压力和完整媒体
 链路仍按 [Python 兼容性文档](python-compatibility.md) 在真实 Mac 上验证。
 这份 CI 不覆盖 Intel Mac、Android 真机操作或性能指标。构建产物仅作为 Actions
-artifact 保存，不发布到 PyPI 或 GitHub Release。
+artifact 保存，不发布到 PyPI 或 GitHub Release。独立的 wheel 发布 workflow、
+跨 macOS 安装验证和 Trusted Publisher 配置见 [发布文档](releasing.md)。
 
 ## 本地复现
 

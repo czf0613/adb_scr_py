@@ -17,6 +17,7 @@ CI_TESTS = [
     "tests/test_recording.py",
     "tests/test_jpg.py",
     "tests/test_free_threading.py",
+    "tests/test_release_artifacts.py",
     "tests/test_native_lifecycle.py::test_cancelled_frame_read_waits_for_native_worker",
     "tests/test_recording_native.py::test_native_recording_api_exists",
 ]
