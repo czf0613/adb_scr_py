@@ -11,8 +11,8 @@ CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14
 云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。
 
 预编译发布 wheel 分为 `macosx_15_0_arm64`、`macosx_26_0_arm64` 两组，分别在
-macOS 15、26 构建，均覆盖上述六种 Python ABI；额外将 macOS 15 产物安装到
-macOS 26 验证兼容性。发布流程见 [发布文档](releasing.md)。
+macOS 15、26 构建并在各自系统上安装验证，均覆盖上述六种 Python ABI。
+发布流程见 [发布文档](releasing.md)。
 
 ## 2026-09-12 MCP Agent 指南及真机补充验证
 
@@ -21,8 +21,7 @@ macOS 26 验证兼容性。发布流程见 [发布文档](releasing.md)。
 通过更新后的 `check_ci.py`：普通版本各 **159 passed, 1 skipped**，3.14t
 为 **160 passed**，导入及测试后 GIL 仍关闭。三份归档的 MCP 模块、Agent 指南、
 原生资源和内部文件排除规则通过验证；`test_run.py` 均只收集。
-两个 workflow 通过 actionlint 1.7.12；发布构建明确覆盖 macOS 15 和 26，
-并保留旧系统产物在新系统上的安装验证。
+两个 workflow 通过 actionlint 1.7.12；发布构建明确覆盖 macOS 15 和 26。
 
 Agent 指南通过初始化 instructions、`adb-scr://guide` resource 和
 `get_agent_guide` 工具提供，正文作为包资源分发。新增指南发现/读取及工具

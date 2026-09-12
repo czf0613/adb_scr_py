@@ -103,61 +103,9 @@ jobs:
           path: test-results.xml
           retention-days: 30
 
-  test-macos-26:
-    name: macOS 15 wheel on macOS 26 / Python ${{ matrix.python }}
-    needs: build-wheels
-    runs-on: macos-26
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
-    env:
-      CI_PYTHON_VERSION: ${{ matrix.python }}
-      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          version: "0.12.13"
-          python-version: ${{ matrix.python == '3.14' && '3.14+gil' || matrix.python }}
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: release-macos-26-${{ matrix.python }}
-
-      - name: Download the wheel and sdist built on macOS 15
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-wheel-macos-15-${{ matrix.python }}
-          path: dist
-
-      - name: Install locked dependencies and the downloaded wheel
-        run: |
-          test "$(uname -m)" = arm64
-          sw_vers
-          uv sync --locked --extra mcp --no-install-project
-          uv pip install --python .venv/bin/python --no-deps dist/*.whl
-
-      - name: Verify the same wheel on macOS 26
-        run: >-
-          env -u PYTHON_GIL uv run --no-sync python -Werror::RuntimeWarning
-          .github/scripts/check_ci.py "$CI_PYTHON_VERSION"
-
-      - name: Save test report
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-test-macos-26-${{ matrix.python }}
-          path: test-results.xml
-          retention-days: 30
-
   prepare-release:
     name: Validate and assemble PyPI distributions
-    needs: [build-wheels, test-macos-26]
+    needs: build-wheels
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

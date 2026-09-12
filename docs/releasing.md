@@ -23,8 +23,7 @@ arm64。发布的 wheel 标签为：
 
 每种 ABI 分别发布 `macosx_15_0_arm64`、`macosx_26_0_arm64` 两个平台的 wheel，
 共 12 个。macOS 15 构建面向 15 及更新系统，macOS 26 构建面向 26 及更新系统。
-两个系统均安装并验证自己构建的 wheel；额外保留六个兼容性任务，在 macOS 26
-下载、安装并验证 macOS 15 的同一批 wheel。
+两个系统均安装并验证自己构建的 wheel，不再运行跨 macOS 版本的安装测试。
 不生成 x86_64、universal2、Linux 或 Windows wheel，也不承诺较老 macOS 的源码
 构建兼容性。平台标签含义见 [Python 打包规范](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/#macos)。
 
@@ -35,7 +34,7 @@ Agent 指南、MCP HTTP/信号测试及其他无设备测试和 GIL 状态。
 构建与 Ubuntu 汇总任务先用 `uv python install` 安装解释器，再运行版本选择；
 普通 3.14 安装请求为 `3.14`，运行选择为 `3.14+gil`，避免无可用下载的 `+gil` 请求。
 
-18 个构建/安装测试任务全部成功后，`prepare_release.py` 检查两个平台各六种 wheel 是否齐全、
+12 个构建/安装测试任务全部成功后，`prepare_release.py` 检查两个平台各六种 wheel 是否齐全、
 平台/ABI 是否正确、文件名与包元数据版本是否一致，然后选择一份 sdist。
 `twine check --strict` 通过后，将 **12 个 wheel + 1 个 sdist** 保存为
 `pypi-distributions` artifact，保留 30 天。各 Python 的原始产物和 JUnit 报告也保留
