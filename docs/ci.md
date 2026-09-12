@@ -13,6 +13,11 @@ Actions 页面使用 **Run workflow** 手动触发。其他分支的 push 不触
 共 12 个独立任务，一个失败不会取消同次运行的其他版本。连续推送同一分支时，
 取消旧的 workflow。每个任务最多 20 分钟，产物与 JUnit 报告保留 7 天。
 
+编译目标与发布流程一致：macOS 15/26 分别设置 deployment target 15.0/26.0，
+使用 `ARCHFLAGS=-arch arm64`，wheel 显式标记对应的 arm64 平台，并通过
+`lipo` 核对实际扩展。不能继承 runner 的 Python 默认配置；其中 Python 3.11
+可能默认使用 macOS 10.9/universal2，导致 CoreVideo/Metal 声明在编译时不可见。
+
 截至 2026-09-11，选择 GitHub 提供的最近两个稳定 macOS 镜像；显式版本避免
 `macos-latest` 迁移期间覆盖范围漂移。macOS 14 已进入退役流程，将于
 2026-11-02 停用，因此不加入新矩阵。未来新增稳定镜像时更新此表与 workflow。
@@ -65,12 +70,17 @@ artifact 保存，不发布到 PyPI 或 GitHub Release。独立的 wheel 发布 
 ```bash
 export CI_PYTHON_VERSION=3.10
 export UV_PYTHON="$CI_PYTHON_VERSION"
+# 本机选择与 runner 相同的目标；macOS 26 检查改为 26.0/macOS 26 平台。
+export MACOSX_DEPLOYMENT_TARGET=15.0
+export WHEEL_PLATFORM=macosx-15.0-arm64
+export ARCHFLAGS="-arch arm64"
 if [ "$CI_PYTHON_VERSION" = 3.14 ]; then
   export UV_PYTHON=3.14+gil
 fi
 uv sync --locked --extra mcp --no-install-project
 uv run --no-sync setup.py build_ext --inplace
-uv build --out-dir dist
+uv build --sdist --out-dir dist
+uv build --wheel dist/*.tar.gz --out-dir dist --config-setting="--build-option=--plat-name=$WHEEL_PLATFORM"
 uv pip install --python .venv/bin/python --no-deps dist/*.whl
 env -u PYTHON_GIL PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run --no-sync python -Werror::RuntimeWarning .github/scripts/check_ci.py "$CI_PYTHON_VERSION"
 ```

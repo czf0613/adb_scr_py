@@ -28,6 +28,9 @@ jobs:
     env:
       CI_PYTHON_VERSION: ${{ matrix.python }}
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.os == 'macos-15' && '15.0' || '26.0' }}
+      WHEEL_PLATFORM: ${{ matrix.os == 'macos-15' && 'macosx-15.0-arm64' || 'macosx-26.0-arm64' }}
+      ARCHFLAGS: "-arch arm64"
 
     steps:
       - uses: actions/checkout@v7
@@ -58,11 +61,15 @@ jobs:
         run: uv run --no-sync setup.py build_ext --inplace
 
       - name: Build sdist and wheel
-        # With neither --sdist nor --wheel, uv builds the wheel from the sdist.
-        run: uv build --out-dir dist
+        # Match release targets; runner Python 3.11 may default to 10.9/universal2.
+        run: |
+          uv build --sdist --out-dir dist
+          uv build --wheel dist/*.tar.gz --out-dir dist --config-setting="--build-option=--plat-name=$WHEEL_PLATFORM"
 
       - name: Install the built wheel
-        run: uv pip install --python .venv/bin/python --no-deps dist/*.whl
+        run: |
+          uv pip install --python .venv/bin/python --no-deps dist/*.whl
+          test "$(lipo -archs .venv/lib/python*/site-packages/adb_scr/media_ext/*.so)" = arm64
 
       - name: Verify package and run tests without a device
         # Keep the installed wheel; a sync here would restore an editable install.
