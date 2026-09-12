@@ -10,8 +10,62 @@ Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖
 CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14t 的实际 GIL 状态。
 云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。
 
-预编译发布 wheel 的最低 macOS 标签为 `macosx_15_0_arm64`，覆盖上述六种 Python
-ABI，在 macOS 15 构建后安装到 macOS 26 验证；发布流程见 [发布文档](releasing.md)。
+预编译发布 wheel 分为 `macosx_15_0_arm64`、`macosx_26_0_arm64` 两组，分别在
+macOS 15、26 构建，均覆盖上述六种 Python ABI；额外将 macOS 15 产物安装到
+macOS 26 验证兼容性。发布流程见 [发布文档](releasing.md)。
+
+## 2026-09-12 MCP Agent 指南及真机补充验证
+
+0.3.1 发布前，普通 3.14.7 的完整无设备测试通过 **226 项，跳过 1 项**。
+独立临时源树中的 3.10.20、3.14.7、3.14.6t 均重新构建并安装 0.3.1 wheel，
+通过更新后的 `check_ci.py`：普通版本各 **159 passed, 1 skipped**，3.14t
+为 **160 passed**，导入及测试后 GIL 仍关闭。三份归档的 MCP 模块、Agent 指南、
+原生资源和内部文件排除规则通过验证；`test_run.py` 均只收集。
+两个 workflow 通过 actionlint 1.7.12；发布构建明确覆盖 macOS 15 和 26，
+并保留旧系统产物在新系统上的安装验证。
+
+Agent 指南通过初始化 instructions、`adb-scr://guide` resource 和
+`get_agent_guide` 工具提供，正文作为包资源分发。新增指南发现/读取及工具
+readOnlyHint 回归测试后，Python **3.14.7** 和独立临时环境中的
+Python **3.10.20** 均通过两个 MCP 测试文件中的 **28 项无设备测试**。
+3.10 重新构建、安装 wheel，验证包内指南可读取；sdist/wheel 均包含指南，
+原有原生源码、扩展和类型资源保留，docs/tests/AGENTS.md 仍未进入归档。
+
+经用户明确授权，另用一次性 Codex CLI 配置连接真实 MCP 服务。Codex 先读取
+指南，再枚举、连接手机，通过截图、点击、滑动进入设置中的设备信息页面，读取
+两个 IMEI 栏位，并用原比例高质量 ROI 截图核对；随后由另一 MCP 客户端截图复核。
+不在仓库保存设备标识或截图。保持设备连接时发送 Ctrl+C，日志确认关闭所有
+设备会话、删除临时 scrcpy 资源、完成 `deinit_lib()`，服务以退出码 0 结束。
+
+## 2026-09-12 FastAPI MCP 服务初次验证
+
+新增可选 `mcp` extra 与 `src/adb_scr_mcp`，基于 FastAPI/官方 MCP SDK 提供
+Streamable HTTP 工具，由 lifespan 管理库及设备所有权，专用 Uvicorn runner
+处理 Ctrl+C/SIGTERM 和重复信号。入口和使用方法见 [MCP 文档](mcp.md)。
+
+普通 Python **3.14.7** 原地构建扩展；Python **3.10.20** 在独立临时源树
+构建 sdist/wheel，安装 wheel 后导入和测试。两个版本均通过下列四个文件中的
+**42 项无设备测试**，其中新增 MCP 测试 26 项。测试覆盖真实 HTTP 和官方
+MCP 客户端初始化/调用、JPEG 图片内容、输入拒绝、多指转换、设备复用、失败清理、
+并发 lifespan 所有权、asyncio/AnyIO 取消，以及真实子进程下 SIGINT、SIGTERM、
+重复信号、启动中退出、连接中退出和绑定端口失败。
+
+3.10 编译全部 43 个源码/测试/存根文件，并导入全部源码模块，确认使用临时
+site-packages 中的安装包。归档包含新 MCP 模块、py.typed、console script、
+可选依赖元数据，以及原有原生源码/头文件、scrcpy 资源、扩展及类型存根；
+不包含 docs/、tests/、AGENTS.md。正常 `.venv` 和 `.python-version` 保持 3.14。
+
+本次未修改原生并发实现，没有重跑 3.14t。MCP 验证使用设备/ADB 替身，没有
+连接手机；`tests/test_run.py` 仅包含在语法编译中，没有执行。
+
+```bash
+uv run --python 3.14 --locked --extra mcp setup.py build_ext --inplace
+uv run --python 3.14 --locked --extra mcp pytest tests/test_mcp_server.py tests/test_mcp_shutdown.py tests/test_device_session.py tests/test_lifecycle.py -q
+```
+
+3.10 沿用后文独立源树流程，环境安装改为
+`uv sync --python 3.10 --locked --extra mcp --no-install-project`，安装 wheel 后
+使用 `uv run --no-sync --python 3.10 pytest` 执行上述四个文件。
 
 ## 2026-09-11 H.264/AAC 屏幕录制验证
 
@@ -436,6 +490,7 @@ for path in archives:
         required = "adb_scr/res/scrcpy-server.bin"
         assert "adb_scr/py.typed" in names
         assert "adb_scr/media_ext/_adb_scr_media.pyi" in names
+        assert "adb_scr_mcp/agent_guide.md" in names
         assert any(name.endswith(".so") for name in names)
     else:
         with tarfile.open(path) as archive:
@@ -444,6 +499,7 @@ for path in archives:
         required = "src/adb_scr/res/scrcpy-server.bin"
         assert "native_code/macOS/src/adb_scr_media.c" in names
         assert "native_code/macOS/include/vtb_decoder.h" in names
+        assert "src/adb_scr_mcp/agent_guide.md" in names
     forbidden = {"docs", "tests", "AGENTS.md", "CLAUDE.md"}
     assert not any(forbidden.intersection(PurePosixPath(name).parts) for name in names)
     assert required in names

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build-test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    name: Build and test / ${{ matrix.os }} arm64 / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -52,7 +52,7 @@ jobs:
           uv --version
 
       - name: Install locked dependencies
-        run: uv sync --locked --no-install-project
+        run: uv sync --locked --extra mcp --no-install-project
 
       - name: Build native extension in place
         run: uv run --no-sync setup.py build_ext --inplace

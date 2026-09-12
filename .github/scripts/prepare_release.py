@@ -22,8 +22,11 @@ def prepare_release(artifacts: Path, output: Path, version: str,
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError(f"Output directory must be empty: {output}")
 
-    tags = [f"cp{minor}-cp{minor}-macosx_15_0_arm64" for minor in range(310, 315)]
-    tags.append("cp314-cp314t-macosx_15_0_arm64")
+    tags = []
+    for macos in (15, 26):
+        tags.extend(f"cp{minor}-cp{minor}-macosx_{macos}_0_arm64"
+                    for minor in range(310, 315))
+        tags.append(f"cp314-cp314t-macosx_{macos}_0_arm64")
     expected = {f"adb_scr_py-{version}-{tag}.whl": tag for tag in tags}
     wheels = sorted(artifacts.rglob("*.whl"))
     if len(wheels) != len(expected) or {path.name for path in wheels} != set(expected):

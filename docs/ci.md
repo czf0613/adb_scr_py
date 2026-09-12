@@ -21,16 +21,18 @@ Actions 页面使用 **Run workflow** 手动触发。其他分支的 push 不触
 
 ## 每个任务执行的检查
 
-1. 使用 uv 0.12.13 和目标 Python，以 `uv sync --locked --no-install-project`
-   安装锁定的运行及开发依赖。
+1. 使用 uv 0.12.13 和目标 Python，以 `uv sync --locked --extra mcp --no-install-project`
+   安装锁定的运行、MCP 及开发依赖。
 2. 通过 `setup.py build_ext --inplace` 编译 C/Objective-C 扩展，再用 `uv build`
    构建 sdist，并从 sdist 构建目标解释器 ABI 对应的 wheel。
 3. 安装刚构建的 wheel；随后使用 `uv run --no-sync`，避免恢复可编辑安装。
 4. [check_ci.py](../.github/scripts/check_ci.py) 编译源码、测试、构建脚本和
    `.pyi`；检查归档的 Python/原生源码、扩展、资源与类型信息，以及内部文件排除规则。
-   同时验证 wheel ABI，并从 site-packages 导入所有模块和原生扩展。
+   同时验证 wheel ABI，并从 site-packages 导入基础库、MCP 模块及原生扩展，
+   确认包内 Agent 指南可读取。
 5. 运行显式列出的无设备测试，覆盖手势、连接生命周期、音频协议、录制编排、
-   真实 BGRA8 → JPEG 编码、原生线程状态与取消等待。真机 `test_run.py` 仅收集。
+   真实 BGRA8 → JPEG 编码、原生线程状态与取消等待，以及 MCP HTTP 和退出信号。
+   真机 `test_run.py` 仅收集。
 6. 3.14t 校验解释器构建标志，并在导入前后及测试结束时确认 GIL 关闭；清除
    `PYTHON_GIL`，不使用 `-X gil=0`。普通版本只跳过 free-threaded 专属用例。
 
@@ -66,7 +68,7 @@ export UV_PYTHON="$CI_PYTHON_VERSION"
 if [ "$CI_PYTHON_VERSION" = 3.14 ]; then
   export UV_PYTHON=3.14+gil
 fi
-uv sync --locked --no-install-project
+uv sync --locked --extra mcp --no-install-project
 uv run --no-sync setup.py build_ext --inplace
 uv build --out-dir dist
 uv pip install --python .venv/bin/python --no-deps dist/*.whl

@@ -139,11 +139,42 @@ JPEG 直出在 GCD 队列内取得 retain 的帧快照，随后在队列外编�
 
 asyncio 锁只协调同一事件循环中的协程，不是操作系统线程锁。设备实例、初始化/反初始化和模块配置仍应由同一事件循环管理；free-threaded 支持不允许跨事件循环共享这些状态。原生工作线程依赖 Capsule mutex 和 GCD 队列实现同步，同一句柄串行，不同句柄及独立 BGRA8 → JPEG 调用可并行。进程内共享的 vImage 转换参数和 BGRA8 编码色彩空间经 `dispatch_once` 初始化后只读；其余编码状态按调用或句柄隔离。ADB daemon 仍在进程内共享。
 
+## FastAPI MCP 服务
+
+可选包 `src/adb_scr_mcp` 将公共 Python API 暴露为 Streamable HTTP MCP 工具。
+`app.py` 的 `create_app()` 只组装应用；父 FastAPI lifespan 先初始化 runtime，
+再进入官方 SDK 的 `session_manager.run()`，因为挂载子应用不会自动运行 lifespan。
+SDK 子应用挂载在根路径，最终端点是 `/mcp`；父应用另提供 `/healthz`。
+使用无状态 HTTP 和 JSON 响应，手机会话仍在服务进程中共享和持久保存。
+
+`guidance.py` 提供 initialize instructions，并将包内 `agent_guide.md` 同时暴露为
+只读工具 `get_agent_guide` 和资源 `adb-scr://guide`，让远程 agent 无需访问仓库
+文件即可了解能力、调用流程和坐标语义。正文单独作为运行时 package data 分发；
+开发文档仍留在 docs/ 并排除出分发包。
+
+`runtime.py` 拥有库初始化、每个 serial 的唯一 `AndroidDevice`、设备访问锁和
+在途操作任务集合。创建连接前即登记所有权，失败/取消连接仍可在退出时清理。
+同设备工具串行执行，不同设备并行。`tools.py` 完成 MCP 参数校验及公共 API
+适配，截图返回 JPEG image 内容，控制返回提交状态；媒体/BGRA8 管线保持原样。
+
+`server.py` 的专用 Uvicorn runner 捕获 SIGINT/SIGTERM，仅标记退出请求并拒绝新工具，
+重复信号也不设置 `force_exit`。先等待 HTTP drain，超时取消请求，然后退出 MCP
+会话管理器、取消并等待在途操作，逐台等待 disconnect，最后 deinit_lib。
+清理通过 AnyIO cancel scope shield 和已有 `complete_on_cancel()` 保护；不调用
+loop.stop，不在原生工作尚未完成时关闭事件循环。初始化中退出、端口绑定失败和
+宿主取消 serve 也走清理，退出后恢复原信号处理器。
+
+HTTP drain 有可配置超时；资源清理没有强制销毁截止时间。单项 disconnect 异常
+不会阻止其余设备及库的清理，错误日志和失败退出保留。服务只绑定 loopback，
+单进程且不使用 reload；首次 await 前即占用进程内所有权，拒绝并发 lifespan
+或接管已有初始化库，清理结束才释放所有权。本机 ADB daemon 依旧共享，
+deinit 会影响其他 ADB 使用者。完整启动方式、工具和边界见 [mcp.md](mcp.md)。
+
 ## 构建与验证
 
 推送到 `master` 后由 GitHub Actions 在 macOS 15/26 arm64 上分别构建和测试 Python 3.10–3.14、3.14t。CI 从已安装 wheel 验证导入、归档与 ABI，运行不依赖 Android 设备或真实 VideoToolbox 硬件的指定测试；硬件媒体链路仍在真实 Mac 上验证。流程与覆盖边界见 [CI 文档](ci.md)。
 
-发布流程在 macOS 15 上构建六种 ABI 的 arm64 wheel，并在 macOS 15/26 测试同一批文件；GitHub Release 发布时通过 PyPI Trusted Publishing 上传验证后的六个 wheel 和一个 sdist。手动触发仅构建验证，详见 [发布文档](releasing.md)。
+发布流程在 macOS 15、26 上各构建六种 ABI 的 arm64 wheel，分别使用对应的最低系统版本标签；额外在 macOS 26 验证 macOS 15 的同一批 wheel。GitHub Release 发布时通过 PyPI Trusted Publishing 上传验证后的十二个 wheel 和一个 sdist。手动触发仅构建验证，详见 [发布文档](releasing.md)。
 
 原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI；普通 3.14 的 `cp314` 与 free-threaded 3.14 的 `cp314t` ABI 需要分别构建，不能混用。本地默认环境仍为普通 3.14；3.10 和 3.14t 在独立临时环境验证，命令见 [Python 兼容性](python-compatibility.md)。本次不新增子解释器支持。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
 

@@ -1,6 +1,6 @@
 [project]
 name = "adb_scr_py"
-version = "0.3.0"
+version = "0.3.1"
 description = "使用ADB协议在电脑上控制手机，并能高效获取屏幕显示的内容"
 readme = "README.md"
 keywords = ["adb", "screen mirror", "phone control"]
@@ -17,6 +17,18 @@ dependencies = ["aiofiles>=25.1.0"]
 [project.urls]
 Home-page = "https://github.com/czf0613/adb_scr_py"
 
+[project.scripts]
+adb-scr-mcp = "adb_scr_mcp.server:main"
+
+[project.optional-dependencies]
+mcp = [
+    "anyio>=4.5,<5",
+    "fastapi>=0.115,<1",
+    "mcp>=1.30,<2",
+    "pydantic>=2.11,<3",
+    "uvicorn>=0.52.4,<0.53",
+]
+
 [build-system]
 requires = ["setuptools>=45.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -25,7 +37,7 @@ build-backend = "setuptools.build_meta"
 package-dir = { "" = "src" }
 packages.find = { where = ["src"] }
 include-package-data = true
-package-data = { adb_scr = ["res/scrcpy-server.bin"] }
+package-data = { adb_scr = ["res/scrcpy-server.bin"], adb_scr_mcp = ["agent_guide.md"] }
 
 [dependency-groups]
 dev = ["pytest>=7.0.1", "setuptools>=82.0.0"]

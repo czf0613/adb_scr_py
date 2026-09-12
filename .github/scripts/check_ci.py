@@ -18,6 +18,8 @@ CI_TESTS = [
     "tests/test_jpg.py",
     "tests/test_free_threading.py",
     "tests/test_release_artifacts.py",
+    "tests/test_mcp_server.py",
+    "tests/test_mcp_shutdown.py",
     "tests/test_native_lifecycle.py::test_cancelled_frame_read_waits_for_native_worker",
     "tests/test_recording_native.py::test_native_recording_api_exists",
 ]
@@ -59,15 +61,17 @@ def check_archives(free_threaded: bool) -> None:
 
     package_files = {
         path.as_posix()
-        for path in Path("src/adb_scr").rglob("*")
+        for package in ("adb_scr", "adb_scr_mcp")
+        for path in (Path("src") / package).rglob("*")
         if path.is_file() and (
             path.suffix in {".py", ".pyi"}
-            or path.name in {"py.typed", "scrcpy-server.bin"}
+            or path.name in {"py.typed", "scrcpy-server.bin", "agent_guide.md"}
         )
     }
     assert "src/adb_scr/res/scrcpy-server.bin" in package_files
     assert "src/adb_scr/py.typed" in package_files
     assert "src/adb_scr/media_ext/_adb_scr_media.pyi" in package_files
+    assert "src/adb_scr_mcp/agent_guide.md" in package_files
     assert package_files <= sdist_names, package_files - sdist_names
     wheel_files = {name.removeprefix("src/") for name in package_files}
     assert wheel_files <= wheel_names, wheel_files - wheel_names
@@ -90,7 +94,7 @@ def check_archives(free_threaded: bool) -> None:
 def check_imports() -> None:
     # Import every shipped module from site-packages, never from src/.
     site_packages = Path(sysconfig.get_path("platlib")).resolve()
-    for path in sorted(Path("src/adb_scr").rglob("*.py")):
+    for path in sorted(Path("src").glob("adb_scr*/**/*.py")):
         parts = path.relative_to("src").with_suffix("").parts
         if parts[-1] == "__init__":
             parts = parts[:-1]
@@ -99,6 +103,9 @@ def check_imports() -> None:
     from adb_scr.media_ext import _adb_scr_media
 
     assert Path(_adb_scr_media.__file__).resolve().is_relative_to(site_packages)
+    from importlib.resources import files
+
+    assert "get_agent_guide" in files("adb_scr_mcp").joinpath("agent_guide.md").read_text(encoding="utf-8")
     print(f"Imported all modules and the native extension from {site_packages}", flush=True)
 
 

@@ -106,6 +106,18 @@ finally:
 
 每台设备同时最多一份录制，重复开始会报错；重复停止安全。断连会自动结束录制，异步写入错误可通过 `stop_recording()` 获取。接口异常与时间精度见 [录制 API](docs/api.md#屏幕录制)。
 
+## MCP 服务
+
+可选的 `adb_scr_mcp` 包提供 FastAPI + Streamable HTTP 服务，lifespan 自动初始化
+库，并在 Ctrl+C/SIGTERM 时等待设备、录制和 ADB 清理完成。启动后由客户端显式连接设备。
+
+```bash
+uv run --python 3.14 --locked --extra mcp adb-scr-mcp --port 8000
+```
+
+客户端地址为 `http://127.0.0.1:8000/mcp`。提供设备枚举/连接、JPEG 截图、触控、
+应用控制及 MP4 录制工具。安装、参数和退出流程见 [MCP 服务文档](docs/mcp.md)。
+
 ## API 索引
 
 | 入口 | 用途 |

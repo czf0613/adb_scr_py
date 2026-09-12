@@ -19,17 +19,25 @@ defaults:
 
 jobs:
   build-wheels:
-    name: Build on macOS 15 / Python ${{ matrix.python }}
-    runs-on: macos-15
+    name: Build on ${{ matrix.platform.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        platform:
+          - os: macos-15
+            deployment_target: "15.0"
+            wheel_platform: macosx-15.0-arm64
+          - os: macos-26
+            deployment_target: "26.0"
+            wheel_platform: macosx-26.0-arm64
         python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
     env:
       CI_PYTHON_VERSION: ${{ matrix.python }}
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment_target }}
+      WHEEL_PLATFORM: ${{ matrix.platform.wheel_platform }}
       ARCHFLAGS: "-arch arm64"
       RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
@@ -44,7 +52,7 @@ jobs:
           python-version: ${{ matrix.python == '3.14' && '3.14+gil' || matrix.python }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-          cache-suffix: release-macos-15-${{ matrix.python }}
+          cache-suffix: release-build-${{ matrix.platform.os }}-${{ matrix.python }}
 
       - name: Install the target Python interpreter
         # +gil selects an installed regular interpreter; install by version first.
@@ -60,16 +68,16 @@ jobs:
           fi
 
       - name: Install locked dependencies
-        run: uv sync --locked --no-install-project
+        run: uv sync --locked --extra mcp --no-install-project
 
       - name: Build native extension in place
         run: uv run --no-sync setup.py build_ext --inplace
 
-      - name: Build sdist and wheel for macOS 15 or later
+      - name: Build sdist and wheel for the target macOS version
         # Pin the wheel tag as well as ARCHFLAGS: some runner Pythons are universal2.
         run: |
           uv build --sdist --out-dir dist
-          uv build --wheel dist/*.tar.gz --out-dir dist --config-setting=--build-option=--plat-name=macosx-15.0-arm64
+          uv build --wheel dist/*.tar.gz --out-dir dist --config-setting="--build-option=--plat-name=$WHEEL_PLATFORM"
 
       - name: Install and verify the built wheel
         run: |
@@ -80,7 +88,7 @@ jobs:
       - name: Save tested distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-wheel-${{ matrix.python }}
+          name: release-wheel-${{ matrix.platform.os }}-${{ matrix.python }}
           path: |
             dist/*.whl
             dist/*.tar.gz
@@ -91,12 +99,12 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-test-macos-15-${{ matrix.python }}
+          name: release-build-test-${{ matrix.platform.os }}-${{ matrix.python }}
           path: test-results.xml
           retention-days: 30
 
   test-macos-26:
-    name: Install on macOS 26 / Python ${{ matrix.python }}
+    name: macOS 15 wheel on macOS 26 / Python ${{ matrix.python }}
     needs: build-wheels
     runs-on: macos-26
     timeout-minutes: 20
@@ -124,14 +132,14 @@ jobs:
       - name: Download the wheel and sdist built on macOS 15
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-wheel-${{ matrix.python }}
+          name: release-wheel-macos-15-${{ matrix.python }}
           path: dist
 
       - name: Install locked dependencies and the downloaded wheel
         run: |
           test "$(uname -m)" = arm64
           sw_vers
-          uv sync --locked --no-install-project
+          uv sync --locked --extra mcp --no-install-project
           uv pip install --python .venv/bin/python --no-deps dist/*.whl
 
       - name: Verify the same wheel on macOS 26
@@ -173,7 +181,7 @@ jobs:
           pattern: release-wheel-*
           path: artifacts
 
-      - name: Require all six arm64 ABIs and select one sdist
+      - name: Require six arm64 ABIs for both macOS targets and select one sdist
         run: >-
           uv run --no-project python .github/scripts/prepare_release.py artifacts dist
           --version "$(uv version --short)" --release-tag "$RELEASE_TAG"
