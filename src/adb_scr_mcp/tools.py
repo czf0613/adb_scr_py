@@ -212,11 +212,26 @@ def register_tools(mcp: FastMCP, runtime: Runtime) -> None:
 
     @mcp.tool()
     async def start_recording(
-        serial: Serial, output_file: Annotated[str, Field(min_length=1)]
+        serial: Serial, output_file: Annotated[str, Field(min_length=1)],
+        quality: Annotated[float, Field(
+            strict=True, ge=0.0, le=1.0, allow_inf_nan=False,
+            description=(
+                "H.264 recording quality, 0.0 to 1.0; default 0.75. "
+                "Higher values usually improve quality and increase file size. "
+                "This is not the screenshot quality scale of 1 to 100, a bitrate, "
+                "or a file-size ratio; 1.0 does not guarantee lossless H.264."
+            ),
+        )] = 0.75,
     ) -> dict[str, Any]:
-        """Record to a new MP4 path on the server computer. Parent must exist; no overwrite."""
+        """Record the screen and available audio to a new MP4 on the server computer.
+
+        Keep quality=0.75 for the default balance, lower it for smaller files, or
+        raise it for higher quality. Actual size depends on content and hardware;
+        no fixed size reduction is guaranteed. Audio is passed through unchanged.
+        The parent directory must exist, and existing files are never overwritten.
+        """
         async with runtime.device(serial) as device:
-            await device.start_recording(output_file)
+            await device.start_recording(output_file, quality=quality)
             return {"status": "recording", "serial": serial, "output_file": output_file}
 
     @mcp.tool()

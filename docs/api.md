@@ -112,7 +112,7 @@ jpeg = await device.get_screenshot_jpg(
 ### 屏幕录制
 
 ```python
-async def start_recording(output_file: str) -> None: ...
+async def start_recording(output_file: str, quality: float = 0.75) -> None: ...
 async def stop_recording() -> None: ...
 ```
 
@@ -120,7 +120,9 @@ async def stop_recording() -> None: ...
 
 `output_file` 必须为非空、无 NUL 的字符串。不根据后缀猜容器，输出始终为 MP4；不覆盖已有文件，不创建父目录。路径类型错误抛出 `TypeError`，空路径/NUL 抛出 `ValueError`；文件和编码器错误抛出 `OSError` 或 `RuntimeError`。`stop_recording()` 返回后文件才完成封装，运行期间不保证可供播放器打开。
 
-视频从 NV12 直接经 VideoToolbox 硬件编码为 H.264，码率、画质、编码 Profile 和关键帧间隔采用系统默认设置，不启用牺牲画质的速度优先提示；保留实时编码、预期帧率和禁止帧重排配置。实际码率和文件大小随系统、尺寸和画面内容变化。输出画布使用首帧尺寸；旋转后的画面原生等比适配、居中留黑。编码队列有界，过载可能丢弃中间视频帧；不影响原始 BGRA8/JPEG 获取路径。停止会补齐缓存尾帧的持续时间，即使整段录制没有新视频包也能生成文件。
+`quality` 默认为 `0.75`，接受 `0.0–1.0` 范围内的有限 int/float，不接受 bool、字符串或 None。类型错误抛 `TypeError`，越界或非有限数抛 `ValueError`，参数验证在创建文件之前完成。参数传给 [VideoToolbox Quality](https://developer.apple.com/documentation/videotoolbox/kvtcompressionpropertykey_quality)，越高通常画质越好、文件越大；不是固定码率、文件体积比例或跨硬件一致的画质指标，`1.0` 不保证 H.264 无损。省略参数的旧调用继续可用，但改用明确的 `0.75` 质量。
+
+视频从 NV12 直接经 VideoToolbox 硬件编码为 H.264，编码 Profile 和关键帧间隔采用系统默认设置，不指定固定码率，不启用牺牲画质的速度优先提示；保留实时编码、预期帧率和禁止帧重排配置。实际码率和文件大小随系统、尺寸和画面内容变化。输出画布使用首帧尺寸；旋转后的 BT.709/未标记画面由 Metal 直接对 NV12 平面做双线性等比缩放、居中留黑；显式非 BT.709 输入保留基于 Metal 的色彩转换。录制使用部分 Metal 特性，推荐 Apple silicon，不保证 Intel Mac 能正常使用。开始时要求可用的 Metal 设备并完成 GPU pipeline 准备；Metal 初始化失败抛出 `RuntimeError`。编码队列有界，过载可能丢弃中间视频帧；不影响原始 BGRA8/JPEG 获取路径。停止会补齐缓存尾帧的持续时间，即使整段录制没有新视频包也能生成文件。
 
 AAC 包直接封装，不解码/重新编码音频。音视频共用设备 PTS，开始时间通过媒体 PTS 与本机单调时钟映射确定，不使用久未变化的视频 PTS 充当当前时间。音频以完整 AAC 包为边界，48 kHz 下 1024 个采样约为 21.3 ms；不承诺采样级裁剪或跨设备硬实时同步。
 

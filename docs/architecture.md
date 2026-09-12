@@ -183,7 +183,9 @@ deinit 会影响其他 ADB 使用者。完整启动方式、工具和边界见 [
 
 ## 录制时间与资源边界
 
-`RecordingController` 属于一个控制句柄，原生录制器独立于解码器。录制编码器使用系统默认码率、画质、Profile 和关键帧间隔，保留实时编码、预期帧率和禁止帧重排设置。开始时在解码器锁内取得原生首帧并创建录制；原生观察者由解码器帧队列保存引用。后续 SPS/PPS 到达时，旧解码器先解绑录制、排空和关闭，新解码器创建后再绑定同一录制。原生 recorder 自己保留最新帧，旋转和暂时无新解码帧都不会丢失尾帧。
+`RecordingController` 属于一个控制句柄，原生录制器独立于解码器。`AndroidDevice.start_recording(output_file, quality=0.75)` 在录制控制器校验质量后，经解码器包装层和 C 扩展传入原生录制创建；MCP 同样公开此参数。每份录制开始时设置 `kVTCompressionPropertyKey_Quality`，不随解码器替换重新设置。录制编码器不指定固定码率，Profile 和关键帧间隔使用系统默认值，保留实时编码、预期帧率和禁止帧重排设置。开始时在解码器锁内取得原生首帧并创建录制；原生观察者由解码器帧队列保存引用。后续 SPS/PPS 到达时，旧解码器先解绑录制、排空和关闭，新解码器创建后再绑定同一录制。原生 recorder 自己保留最新帧，旋转和暂时无新解码帧都不会丢失尾帧。
+
+录制要求可用的 Metal 设备，在开始时创建并复用每个 recorder 的 command queue、compute pipeline 和 CVMetalTextureCache，避免首次旋转时才编译 shader。解码输出和录制编码器 buffer pool 都要求 Metal-compatible NV12。输出尺寸固定为录制首帧尺寸；尺寸一致时 retain 原帧直接编码，否则将 NV12 的 Y/UV 平面分别映射为 R8/RG8 texture，由 Metal 双线性缩放并居中填充 video-range 黑色（Y=16、UV=128），直接写回编码器 pool 的 NV12。BT.709 或未标记色彩空间的输入走上述直接路径，不经过 Core Image、RGB 中间图或 CPU 像素复制。显式标记其他矩阵、原色或传递函数的输入，使用同一 Metal command queue 上的 CIContext 保留旧路径的色彩转换；等待 CIRenderTask 完成后才提交编码。GPU 命令在原有录制 GCD 队列中完成等待，之后才释放 texture 引用和提交 H.264 编码；失败保存在录制错误中，不静默回退到 CPU。停止仍先排空队列，再释放 GPU 与编码资源。BGRA8 和 JPEG 的公开接口及原有取帧路径保持不变。
 
 音频有独立的接收任务和录制锁，不为等待截图而获取解码器锁。首部为四字节 `\0aac`，后续与视频一样使用 12 字节包头；配置包保存 AudioSpecificConfig，媒体包保留原始 AAC bytes 和设备 PTS。单音频包上限 1 MiB。首部和首次配置有超时，之后完整包之间允许静默；已开始的半包必须在 io_timeout 内完成。编码器 ID 0 是服务端明确禁用，仅保留视频/控制；ID 1、非法协议或异常 EOF 关闭会话并回收正在录制的文件。
 

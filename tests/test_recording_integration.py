@@ -1,6 +1,7 @@
 """Public recording API through real framed streams and native media, without ADB."""
 
 import asyncio
+import hashlib
 import re
 import subprocess
 from types import SimpleNamespace
@@ -177,5 +178,76 @@ def test_public_api_receives_new_frames_and_auto_finishes_on_eof(monkeypatch, sy
         result = probe(output)
         assert float(result["streams"][0]["duration"]) == pytest.approx(1, abs=0.002)
         assert len(result["packets"]) >= 3, "new decoded frame did not reach the recorder"
+
+    asyncio.run(run())
+
+
+def test_rotation_roundtrip_keeps_video_timeline_and_aac(monkeypatch, synthetic, tmp_path):
+    async def run():
+        clock = [1_000_000]
+        monkeypatch.setattr(recording, "monotonic_us", lambda: clock[0])
+        device, handle, readers = await connected_device(monkeypatch, synthetic, audio=True)
+        output = tmp_path / "rotation-audio.mp4"
+        consumed = 0
+        original = handle.audio_stream.consume
+
+        async def consume(data, pts):
+            nonlocal consumed
+            await original(data, pts)
+            consumed += 1
+
+        handle.audio_stream.consume = consume
+
+        async def rotate(name, pts, shape):
+            previous = handle.h264_decoder
+            config, frame = synthetic[0][name]
+            readers[0].feed_data(media_packet(config, config=True)
+                                 + media_packet(frame, pts, key=True))
+
+            async def ready():
+                while True:
+                    assert handle.running, handle.disconnect_reason
+                    current = await handle.get_current_frame()
+                    if current is not None and current[:2] == shape:
+                        return
+                    await asyncio.sleep(0.001)
+
+            await asyncio.wait_for(ready(), 3)
+            assert handle.h264_decoder is not previous
+            assert handle.recording.active is recorder
+
+        try:
+            await device.start_recording(str(output))
+            recorder = handle.recording.active
+            for index, packet in enumerate(synthetic[2][:40]):
+                pts = 10_000_000 + index * 1024_000_000 // 48000
+                clock[0] = pts - 9_000_000
+                if index == 10:
+                    await rotate("portrait", pts, (64, 128))
+                if index == 28:
+                    await rotate("red", pts, (64, 64))
+                readers[1].feed_data(media_packet(packet, pts))
+
+                async def audio_ready():
+                    while consumed != index + 1:
+                        assert handle.running, handle.disconnect_reason
+                        await asyncio.sleep(0.001)
+
+                await asyncio.wait_for(audio_ready(), 3)
+            clock[0] = 2_000_000
+            await device.stop_recording()
+            assert handle.running and handle.recording.error is None
+        finally:
+            await handle.disconnect_sockets()
+        video = probe(output)
+        assert (video["streams"][0]["width"], video["streams"][0]["height"]) == (64, 64)
+        assert float(video["streams"][0]["duration"]) == pytest.approx(1, abs=0.002)
+        assert [float(p["pts_time"]) for p in video["packets"]] == pytest.approx(
+            [0, 10 * 1024 / 48000, 28 * 1024 / 48000, 0.966667], abs=0.001)
+        audio = probe(output, audio=True)["packets"]
+        assert [p["data_hash"] for p in audio] == [
+            "SHA256:" + hashlib.sha256(p).hexdigest() for p in synthetic[2][:40]]
+        assert [float(p["pts_time"]) for p in audio] == pytest.approx(
+            [i * 1024 / 48000 for i in range(40)], abs=0.001)
 
     asyncio.run(run())

@@ -334,7 +334,25 @@ static PyObject *start_recording(PyObject *self, PyObject *args) {
   const char *path;
   long long source_pts;
   int fps;
-  if (!PyArg_ParseTuple(args, "OsOLi", &capsule, &path, &config, &source_pts, &fps)) {
+  PyObject *quality_arg = NULL;
+  double quality = 0.75;
+  if (!PyArg_ParseTuple(args, "OsOLi|O", &capsule, &path, &config, &source_pts, &fps,
+                       &quality_arg)) {
+    return NULL;
+  }
+  if (quality_arg != NULL) {
+    if (PyBool_Check(quality_arg) ||
+        !(PyFloat_Check(quality_arg) || PyLong_Check(quality_arg))) {
+      PyErr_SetString(PyExc_TypeError, "quality must be int or float, not bool");
+      return NULL;
+    }
+    quality = PyFloat_AsDouble(quality_arg);
+    if (PyErr_Occurred()) {
+      return NULL;
+    }
+  }
+  if (!isfinite(quality) || quality < 0.0 || quality > 1.0) {
+    PyErr_SetString(PyExc_ValueError, "quality must be finite and in 0.0..1.0");
     return NULL;
   }
   if (fps < 1 || fps > 240 || source_pts < 0) {
@@ -360,7 +378,7 @@ static PyObject *start_recording(PyObject *self, PyObject *args) {
     snprintf(error, sizeof(error), "no decoded frame available for recording");
   } else {
     recording = recording_create(frame, path, (const uint8_t *)config_data,
-                                  config_size, source_pts, fps, error);
+                                  config_size, source_pts, fps, quality, error);
     CVPixelBufferRelease(frame);
     if (recording != NULL) {
       vtb_set_frame_observer(handle->decoder, recording, recording_observer);

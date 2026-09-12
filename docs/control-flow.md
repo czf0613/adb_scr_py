@@ -200,12 +200,12 @@ JPEG 编码器属于 Capsule，由原生句柄锁保护，关闭时完成编码�
 
 视频录制订阅 VideoToolbox 输出的 NV12 CVPixelBuffer。首帧直接使用现有缓存快照，由独立硬件 H.264 session 强制生成关键帧；不等待上游 IDR，也不走 BGRA8/Python/JPEG 转换。后续画面通过原生观察者 retain 后提交到录制队列。观察者仅提交工作，不在解码器帧队列内等待编码或磁盘写入。
 
-录制保留实时编码、预期帧率、禁止帧重排和色彩描述；码率、画质、编码 Profile 与关键帧间隔使用 VideoToolbox 默认值，不设置速度优先提示。此前的 256 kbps 目标码率会使高分辨率画面明显模糊，因此根据真机反馈移除；不保证跨设备相同画质或码率。输出画布固定为开始时尺寸，尺寸变化由原生 Core Image 路径等比适配并居中留黑，原尺寸画面保留直接输入路径。AAC AudioSpecificConfig 与原始压缩包交由 CoreMedia/AVAssetWriter 封装，AudioToolbox 仅参与格式描述，不解码或重新编码音频。
+录制保留实时编码、预期帧率、禁止帧重排和色彩描述；质量使用调用方传入的 `quality`（默认 0.75，范围 0.0–1.0），创建时设为 `kVTCompressionPropertyKey_Quality`；不指定固定码率，编码 Profile 与关键帧间隔使用 VideoToolbox 默认值，不设置速度优先提示。此前的 256 kbps 目标码率会使高分辨率画面明显模糊，因此根据真机反馈移除；不保证跨设备相同画质或码率，quality 与文件体积也不是线性关系。输出画布固定为开始时尺寸，尺寸变化由 Metal 直接缩放 NV12 两个平面并居中留黑，原尺寸画面保留直接输入路径。对 BT.709 或未标记色彩空间的输入，双线性采样直接作用于 Y/UV，不经过 Core Image 的工作色彩空间，不保证与旧路径逐像素相同；video-range 黑边为 Y=16、Cb/Cr=128。显式非 BT.709 输入保留 Core Image 色彩转换，CIContext 显式使用本录制器的 Metal command queue，CIRenderTask 完成后才交给编码器；该分支不享受直接 NV12 路径的性能收益。缓存每个录制器的 pipeline、command queue 和纹理映射，shader 在录制开始时准备，首次初始化成本计入 start 而非旋转。每次适配仍需一个目标 NV12 buffer 和一次 GPU 渲染；不是无计算、无目标缓冲的零成本操作。AAC AudioSpecificConfig 与原始压缩包交由 CoreMedia/AVAssetWriter 封装，AudioToolbox 仅参与格式描述，不解码或重新编码音频。
 
 AAC 直通需要显式处理 AVAssetWriter 的 encoder-delay 元数据，不能只给首包设置零裁剪。原生层为开头的包组提供 priming/输出时间，并在结束时用压缩包填充和尾部裁剪补齐封装器的预填充区间；附加填充位于播放区间之外。连续音频的验证逐包比较原始 AAC 内容与 MP4 包哈希、PTS，并用 AVAssetReader 核对有效音频起止，避免文件能播放但整体偏移 44 ms 的情况。
 
 AVAssetWriter 的 AAC 直通会按连续采样时钟写包，不能依靠逐包 PTS 或 EmptyMedia marker 自动保留间隔。原生层允许一包以内的时间抖动，记录超过一包的向前跳变；结束后仅为有间隔的文件建立临时副本，用 AVMutableMovieTrack 插入空白时间段，再以 MPEG-4 格式写入头部并原子替换。视频和 AAC 数据保持压缩内容不变。movie timescale 使用 1,000,000，避免多段空白累计按默认 600 刻度取整。间隔元数据最多 4096 项；超过上限或向后重叠超过一包会报告失败。带间隔的音轨可能含解码预填充引用，验证必须结合原始包存储和 Apple 播放时间区间，不能把预填充引用误判成可听见的重复声音。
 
-录制器独立持有缓存画面。没有画面更新时不要求手机发送重复帧；停止时使用保留的尾帧补齐持续时间，并等待 VideoToolbox 和 MP4 writer 完成。编码队列有界，繁忙时可以跳过中间视频帧，但不能静默丢弃音频后谎报成功。原生层在停止后拒绝新提交，观察者解绑、异步工作和最终资源释放都必须遵循引用所有权。
+录制器独立持有缓存画面。没有画面更新时不要求手机发送重复帧；停止时使用保留的尾帧补齐持续时间，并等待 VideoToolbox 和 MP4 writer 完成。编码队列有界，繁忙时可以跳过中间视频帧，但不能静默丢弃音频后谎报成功。Metal 命令只在录制 GCD 队列内等待；输入、输出 pixel buffer 与 CVMetalTexture 引用保留到 GPU 完成，禁止向 VideoToolbox 提交尚未写完的 surface。初始化、映射或命令失败走录制错误处理。原生层在停止后拒绝新提交，观察者解绑、异步工作和最终资源释放都必须遵循引用所有权。
 
 手机端音频采集从连接时就开始。Android 13+ 的 playback + audio_dup 保留手机播放，Android 11–12L 的 output 会使手机静音；后者的停止录制仅停止写文件，不会关闭整个会话或恢复音频路由。音频不可用的旧系统仍可录制纯视频。应用是否允许采集以及设备 ROM 的实际表现需要真机验证。

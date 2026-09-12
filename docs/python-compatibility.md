@@ -14,6 +14,146 @@ CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14
 macOS 15、26 构建并在各自系统上安装验证，均覆盖上述六种 Python ABI。
 发布流程见 [发布文档](releasing.md)。
 
+## 2026-09-12 0.3.2 发布前验证
+
+MCP 的工具说明、quality 参数 schema 和包内 Agent 指南补齐录屏质量范围、
+默认 0.75、与截图质量范围的区别，以及画质/体积取舍和 AAC 直通说明。
+`pyproject.toml` 与 `uv.lock` 同步为 0.3.2。普通 Python 3.14.7 重新原地
+构建后，全部无设备测试 **253 passed, 1 skipped**；没有执行 `test_run.py`。
+
+独立临时源树分别以 Python 3.10.20、3.14.7、3.14.6t 构建 0.3.2 sdist/wheel
+并安装，从 site-packages 执行 `check_ci.py`。普通版本各 **173 passed,
+1 skipped**，3.14t 为 **174 passed**；源码编译、全部模块导入、实际归档
+内容/ABI、包内 MCP 指南及只收集真机测试均通过，3.14t 的 GIL 检查通过。
+本地三个 wheel 使用 macOS 15 deployment target；macOS 15/26 与其他 Python
+版本的完整发布矩阵由 GitHub Actions 验证，本地测试不能代替该矩阵。
+
+## 2026-09-12 录制 quality 参数验证
+
+`AndroidDevice.start_recording(output_file, quality=0.75)` 新增可选质量参数，
+MCP 同步公开。接受 0.0–1.0 的有限 int/float，拒绝 bool 和其他类型；在创建
+文件前校验，经 Python 控制器、解码器包装层和 C 扩展传至原生录制器，在
+首帧编码前设置 `kVTCompressionPropertyKey_Quality`。原生五参数旧调用
+继续可用并采用 0.75；不添加固定码率或速度优先提示。推荐 Apple silicon，
+因使用部分 Metal 特性，不保证 Intel Mac 能正常使用。
+
+新增回归先在旧实现上确认失败，再完成参数实现。普通 Python **3.14.7**
+原地构建后，三个录制测试文件和 MCP server 测试共 **90 passed**。
+Python **3.10.20**、**3.14.6t** 在独立源树构建并安装 wheel，运行上述测试
+及 free-threading 检查，分别 **91 passed, 1 skipped** 和 **92 passed**；
+3.14t 未强制关闭 GIL，导入前、导入后及测试后均保持关闭。原生 probe 从
+实际硬件 session 读回自定义 Quality=0.625，0/0.4/0.75/1 均完成 H.264
+编码。校验覆盖默认值、自定义值、范围、非有限数、bool 和 MCP schema/转发。
+44 个 Python/存根/测试文件通过真实 3.10 语法编译；实际 sdist/wheel 的
+源码、类型、MCP 指南、资源及排除规则已核对，安装的扩展与 wheel 内容一致。
+
+在 Apple M5 Max / macOS 26.6.2 另做两组离线体积比较。每组使用同样的
+180 帧（30 FPS、6 秒），仅改变 Quality 设置，原生录制队列逐帧排空以避免
+过载丢帧影响比较。旧实现未设置 Quality，系统读回 -1；新实现读回传入值。
+合成画面使用 1920×1080 testsrc2；已有录屏样本取自上一轮用户授权录制的
+2400×1080 视频，先解码为相同的无损中间帧序列。后者是对已压缩录屏的离线
+重编码，不代替手机原始输入的实时画质/性能验证。该离线比较未连接或操作手机。
+
+| 同一段 6 秒画面 | 旧系统默认 | Quality=0.75 | Quality=0.5 |
+| --- | --- | --- | --- |
+| 合成 testsrc2 | 8.90 MB | 9.28 MB（增加约 4%） | 3.67 MB（减少约 59%） |
+| 已有录屏画面 | 9.71 MB | 5.55 MB（减少约 43%） | 1.68 MB（减少约 83%） |
+
+以上为单轮、单机样本，MB 按十进制计算，不承诺固定缩减比例。已有录屏
+样本相对共同输入的 SSIM：旧默认 0.979915、0.75 为 0.977677、0.5 为
+0.969036；该指标不等于主观画质保证。默认保持用户指定的 0.75，文档明确
+quality 不是文件体积比例，1.0 也不保证 H.264 无损。测试视频仅保留在本机
+临时目录，不进入仓库。
+
+后续经用户明确授权，使用默认 quality=0.75 录制 Android 14 真机当前画面
+20 秒，保持当时的竖屏 1080×2400，不执行点击、滑动或旋转。实际文件时长
+20.001148 秒，9,222,759 字节（9.22 MB），整体平均码率约 3.687 Mbps；
+601 个视频包，约 30 FPS，最大相邻视频 PTS 间隔 42.052 ms。48 kHz 双声道
+AAC 共 937 包，与源输入逐包 SHA-256 一致，输出音频连续且非静音；源 PTS
+与采样时钟最大偏差 4.924 ms，小于一个 AAC 包。音视频完整解码无错误，
+抽查第 1、10、19 秒画面，人物及字幕正常。start 约 68.9 ms，stop 约
+10.1 ms；停止后保持连接、重复停止与 disconnect/deinit 清理均通过。
+当前画面包含较大的静态黑色区域，不用这份文件大小推断其他内容的压缩比例。
+
+```bash
+uv run --python 3.14 --locked --extra mcp setup.py build_ext --inplace
+uv run --python 3.14 --locked --extra mcp pytest tests/test_recording.py tests/test_recording_native.py tests/test_recording_integration.py tests/test_mcp_server.py -q
+```
+
+## 2026-09-12 录制旋转 Metal 优化验证
+
+录制的 BT.709/未标记输入在尺寸变化时由 Metal 直接适配 NV12 平面；
+显式非 BT.709 输入保留基于 Metal 的 Core Image 色彩转换。shader 在
+录制开始时准备，首次加载成本不放在首次旋转时承担。原始 BGRA8/JPEG
+路径继续保留，公共函数签名不变。
+
+普通 Python **3.14.7** 原地构建后，相关六个文件通过 **87 项，跳过 1 项**；
+后续颜色回归修复后重新构建，三个录制测试文件通过 **42 项**。
+最终源码在独立源树构建并安装 wheel，Python **3.10.20** 通过
+**87 项，跳过 1 项**；Python **3.14.6t** 通过 **88 项**，导入前、
+导入后及测试后 GIL 均关闭，没有强制设置 PYTHON_GIL 或 -X gil。
+3.10/3.14t 归档仍包含原生源码、扩展、类型和 scrcpy 资源，排除 docs/tests/AGENTS.md。
+
+新增原生像素 probe 覆盖同尺寸直接引用、横竖适配、非 16 对齐尺寸、Y/UV
+黑边、常量与渐变采样、显式 BT.601 到 BT.709 转换；后者先在未经修正的
+直接 Metal 路径下失败。新公共 API 回归覆盖两次配置/解码器替换过程中
+录制器不变、视频时间戳递增及 40 个 AAC 包的哈希和 PTS 保留。
+Metal API validation 下的像素与旋转检查通过。额外临时 probe 比较非均匀
+BT.601 输入，三组尺寸下新颜色转换分支与旧实现的 37,446 字节输出一致。
+上述自动回归全部使用合成媒体，未连接或操作 Android；真机验证见下文。
+
+```bash
+uv run --python 3.14 --locked setup.py build_ext --inplace
+uv run --python 3.14 --locked pytest tests/test_recording_native.py tests/test_recording_integration.py tests/test_recording.py tests/test_native_lifecycle.py tests/test_jpg_direct.py tests/test_free_threading.py -q
+MTL_DEBUG_LAYER=1 uv run --python 3.14 --locked pytest tests/test_recording_native.py::test_rotation_fit_preserves_nv12_planes_and_black_levels -q
+```
+
+性能对比在 **Apple M5 Max / macOS 26.6.2** 完成：用合成、显式标记 BT.709
+的 NV12 输入调用私有 fit_frame，输出宽高对调。输出来自 H.264 编码器 pool；
+计时包括 buffer/texture 操作、适配、GPU 完成和输出像素锁定读取，排除 H.264
+编码、音频、磁盘写入与 Python 调用。每组先预热 10 帧，再测 150 帧，交替
+运行旧 Core Image 与最终 Metal 实现三轮，以下取三轮中位数的中位数。
+
+| 输入 → 输出 | 原 Core Image | Metal NV12 | 适配耗时降低 |
+| --- | --- | --- | --- |
+| 1080×2400 → 2400×1080 | 0.335 ms | 0.196 ms | 约 42% |
+| 1440×3200 → 3200×1440 | 0.389 ms | 0.194 ms | 约 50% |
+
+这是当前机器、合成帧和稳态适配步骤的测量，不是整段录制吞吐承诺，也不代表
+Intel Mac、其他 Apple Silicon 或非 BT.709 转换分支的性能。首次加载 shader
+曾观测到约 94 ms，已移至 start_recording 的准备阶段。当前构建未额外封锁
+x86_64，但录制要求 Metal；本次只在 arm64 实机验证。Metal 本身也支持部分
+Intel Mac，并非 Apple Silicon 专属；是否可录制仍取决于 Metal 与硬件编解码
+能力，尚未进行本库的 Intel 真机验证。由于本库使用部分 Metal 特性，不保证
+Intel Mac 能正常使用，推荐 Apple silicon。[Apple Metal 支持范围](https://support.apple.com/en-euro/102894)
+
+经用户授权，在已播放 B 站视频的 Android 14 真机上完成两轮录制；每轮退出、
+进入全屏各一次，实际尺寸按 2400×1080 → 1080×2400 → 2400×1080 变化。
+四次配置变化均触发解码器替换，原生录制器始终为同一实例；停止录制无错误，
+设备会话仍连接，最后恢复全屏播放并完成 disconnect/deinit 清理。
+
+| 真机录制 | 第一轮 | 第二轮 |
+| --- | --- | --- |
+| 视频时长 | 110.566 s | 75.920 s |
+| MP4 视频包 | 3,304 | 2,264 |
+| MP4 AAC 包 | 5,183 | 3,559 |
+| 两次切换附近最大视频帧间隔 | 218.6 / 245.9 ms | 334.5 / 212.8 ms |
+| 本地解码器替换耗时 | 4.7 / 10.8 ms | 11.1 / 7.0 ms |
+
+两份 MP4 的音视频时间戳均递增，使用 FFmpeg 的 VFR passthrough 和 demux
+timebase 完整解码，无错误输出。输出画布始终为 2400×1080，抽帧确认竖屏
+居中加黑边、恢复横屏后画面正常。切换附近的视频间隔包含手机端旋转、上游
+编码器重建及媒体恢复，不能归因于 Metal 适配耗时，也不承诺旋转无停顿。
+
+第二轮全部 3,559 个 AAC 压缩包逐包 SHA-256 与输入一致，无丢包或插包，
+输出包间隔约 21.333 ms；输入 PTS 每包递增 21,333 微秒，输出采用 48 kHz
+连续采样时钟，最大偏差 1.183 ms，符合一包内时间戳抖动的现有契约。
+第一轮初版取证脚本漏采录制启动交界的首包，其余 5,182 包全部对应一致；
+该轮最大源时间戳偏差 4.528 ms，同样小于一个 AAC 包。第二轮另曾因临时
+脚本的 ADB 子进程继承 stdin，消耗预先排队的停止命令而延长录制；进程采样
+确认主流程在等 stdin，单独发送停止命令即成功，未发现录制停止阻塞。
+设备截图和视频仅保留于本机临时目录，不进入仓库。
+
 ## 2026-09-12 MCP Agent 指南及真机补充验证
 
 0.3.1 发布前，普通 3.14.7 的完整无设备测试通过 **226 项，跳过 1 项**。

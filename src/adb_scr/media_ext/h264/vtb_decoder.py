@@ -97,13 +97,15 @@ class VtbH264Decoder(H264DecoderBase):
         )
 
     async def start_recording(
-        self, output_file: str, audio_config: bytes | None, source_pts: int, fps: int
+        self, output_file: str, audio_config: bytes | None, source_pts: int, fps: int,
+        quality: float = 0.75,
     ) -> "RecordingHandle":
         if not self.valid:
             raise RuntimeError("解码器已关闭")
         # The controller shields result installation, not only this worker.
         return await asyncio.to_thread(
-            _media.start_recording, self.handle, output_file, audio_config, source_pts, fps
+            _media.start_recording, self.handle, output_file, audio_config, source_pts, fps,
+            quality,
         )
 
     async def set_recording(self, recording: "RecordingHandle | None") -> None:

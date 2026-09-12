@@ -9,7 +9,7 @@
 typedef struct recording recording_t;
 recording_t *recording_create(CVPixelBufferRef first_frame, const char *path,
                               const uint8_t *audio_config, size_t config_size,
-                              int64_t source_pts, int fps, char error[512]);
+                              int64_t source_pts, int fps, double quality, char error[512]);
 void recording_retain(void *recording);
 void recording_release(void *recording);
 void recording_submit_frame(void *recording, CVPixelBufferRef frame, int64_t pts);

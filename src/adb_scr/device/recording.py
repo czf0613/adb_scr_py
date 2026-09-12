@@ -47,17 +47,21 @@ class RecordingController:
             self.error = error
         self.freeze_end()
 
-    async def start(self, output_file: str) -> None:
+    async def start(self, output_file: str, quality: float = 0.75) -> None:
         if not isinstance(output_file, str):
             raise TypeError("output_file 必须为字符串")
         if not output_file or "\0" in output_file:
             raise ValueError("output_file 不能为空或包含 NUL")
+        if isinstance(quality, bool) or not isinstance(quality, (int, float)):
+            raise TypeError("quality 必须为 int 或 float，不能为 bool")
+        if not 0.0 <= quality <= 1.0:
+            raise ValueError("quality 必须为 0.0–1.0 的有限数")
         async with self._mutex:
             if self.active is not None:
                 raise RuntimeError("本设备已有正在进行的录制")
             self.error = None
             try:
-                await complete_on_cancel(self._start(output_file))
+                await complete_on_cancel(self._start(output_file, float(quality)))
             except BaseException:
                 # Creation includes installing its result. A cancelled worker
                 # may already own a file/session; finish it before returning.
@@ -68,7 +72,7 @@ class RecordingController:
                         logger.warning(f"回收未完成的录制启动失败：{error!r}")
                 raise
 
-    async def _start(self, output_file: str) -> None:
+    async def _start(self, output_file: str, quality: float) -> None:
         async with self.owner._mutex:
             decoder = self.owner.h264_decoder
             if not self.owner.running or decoder is None or self._clock_offset is None:
@@ -81,7 +85,7 @@ class RecordingController:
             self._source_origin = self._host_origin - self._clock_offset
             self._end_pts = None
             self.active = await decoder.start_recording(
-                output_file, config, self._source_origin, consts.SCREEN_FPS
+                output_file, config, self._source_origin, consts.SCREEN_FPS, quality
             )
             if not self.owner.running:
                 raise RuntimeError("开始录制时设备已断开")

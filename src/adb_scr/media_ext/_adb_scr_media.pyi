@@ -138,6 +138,7 @@ def start_recording(
     audio_config: bytes | None,
     source_pts: int,
     fps: int,
+    quality: float = 0.75,
     /,
 ) -> RecordingHandle:
     """使用最新 NV12 快照创建 MP4，编码零时刻关键帧并绑定解码器。
@@ -147,15 +148,21 @@ def start_recording(
         output_file: 不存在的输出路径；不创建父目录，不覆盖已有文件。
         audio_config: scrcpy AAC-LC AudioSpecificConfig，None 表示仅视频。
         source_pts: 录制开始时的设备时间，单位微秒，必须非负。
-        fps: 1–240 的预期帧率；实时硬件 H.264 编码使用系统默认码率和画质。
+        fps: 1–240 的预期帧率；实时硬件 H.264 编码不指定固定码率。
+        quality: 0.0–1.0 的有限数，默认 0.75，传给 VideoToolbox Quality。
+            越高通常画质越好、文件越大，1.0 不保证 H.264 无损。
 
     Raises:
-        RuntimeError: 无帧、路径不可用、AAC 配置或编码/封装失败。
-        ValueError: FPS 或时间戳超出范围。
+        RuntimeError: 无帧、路径不可用、Metal 不可用、AAC 配置或编码/封装失败。
+        TypeError: quality 不是 int/float，或为 bool。
+        ValueError: FPS、时间戳或 quality 超出范围，或 quality 非有限数。
+        OverflowError: quality 整数无法转换为原生 double。
 
     Notes:
-        返回前首帧已编码并交给 AVAssetWriter。画布保持首帧尺寸，
-        后续尺寸变化按比例居中留黑。必须用工作线程并保留取消所有权。
+        返回前完成 Metal 准备，首帧已编码并交给 AVAssetWriter。
+        画布保持首帧尺寸；尺寸变化时由 Metal 双线性缩放 NV12 平面、
+        居中留黑。BT.709/未标记输入不经 RGB 中间图，显式非 BT.709
+        输入保留基于 Metal 的 Core Image 色彩转换。必须用工作线程并保留取消所有权。
     """
 
 

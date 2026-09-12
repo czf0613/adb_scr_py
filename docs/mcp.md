@@ -119,8 +119,17 @@ asyncio.run(main())
 | `paste` | `text` | 粘贴到已聚焦输入框，最多 100000 字符 |
 | `launch_app` | `package_name`、`activity_name` | 例如 `com.example.app`、`.MainActivity` |
 | `stop_app` | `package_name` | 强制停止应用 |
-| `start_recording` | `output_file` | 写入**服务端电脑**上的新 MP4 文件，不覆盖已有文件，不创建父目录 |
+| `start_recording` | `output_file`，`quality=0.75`（0.0–1.0） | 写入**服务端电脑**上的新 MP4 文件，不覆盖已有文件，不创建父目录 |
 | `stop_recording` | 无 | 等待 MP4 完成；断连后仍可查询最近录制的写入错误 |
+
+录屏 `quality` 接受 `0.0–1.0` 的有限数，默认 `0.75`，与截图的 `1–100` 不同。
+默认值用于兼顾画质和体积；降低数值通常减小文件，提高数值通常改善画质并增大
+文件。它不是固定码率或文件体积比例，不保证固定缩减幅度，`1.0` 也不保证
+H.264 无损。实际效果随画面和硬件变化，AAC 音频保持直通。MCP 参数示例：
+
+```json
+{"serial": "YOUR_DEVICE_SERIAL", "output_file": "/path/to/capture.mp4", "quality": 0.75}
+```
 
 截图 quality 范围为 1–100；scale 必须是有限正数；ROI 为原图
 `[x, y, width, height]`，先裁剪再缩放。触控始终使用原图左上角为原点的像素坐标。

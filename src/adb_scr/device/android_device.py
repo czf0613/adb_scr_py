@@ -262,28 +262,30 @@ class AndroidDevice:
         async with self._mutex:
             await complete_on_cancel(self._disconnect_locked("主动断开"))
 
-    async def start_recording(self, output_file: str) -> None:
+    async def start_recording(self, output_file: str, quality: float = 0.75) -> None:
         """从最新已解码帧开始录制 H.264/AAC MP4。
 
         Args:
             output_file: 新文件路径；不覆盖已有文件，不创建父目录。
+            quality: H.264 压缩质量，0.0–1.0，默认 0.75；越高通常画质越好、文件越大。
 
         Raises:
             RuntimeError: 未连接、无解码帧、重复开始或原生编码失败。
             OSError: 输出文件无法创建或写入。
-            TypeError: 路径不是字符串。
-            ValueError: 路径为空或包含 NUL。
+            TypeError: 路径不是字符串，或 quality 不是 int/float（不接受 bool）。
+            ValueError: 路径为空或包含 NUL，或 quality 非有限数/超出范围。
             asyncio.CancelledError: 已创建的录制结束并释放后传播取消。
 
         Notes:
             音频不可用时记录警告并生成纯视频文件。首帧使用当前画面，
             无需等待下一帧或手机关键帧。音频按 AAC 包边界裁剪。
+            quality 不是固定码率或体积比例，1.0 不保证 H.264 无损。
         """
         handle = self.control_handle
         if not self.is_connected or handle is None:
             raise RuntimeError("设备未连接，无法开始录制")
         self._last_recording = handle.recording
-        await handle.recording.start(output_file)
+        await handle.recording.start(output_file, quality)
 
     async def stop_recording(self) -> None:
         """停止本设备最近的录制，等待 MP4 完整封装；重复调用安全。

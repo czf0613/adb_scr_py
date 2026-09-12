@@ -2,6 +2,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreImage/CoreImage.h>
+#import <Metal/Metal.h>
 #import <VideoToolbox/VideoToolbox.h>
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
@@ -51,7 +52,10 @@ struct recording {
   audio_gap_t audio_gaps[4096];
   size_t audio_gap_count;
   int64_t audio_gap_duration;
-  CIContext *context;
+  id<MTLCommandQueue> fit_queue;
+  id<MTLComputePipelineState> fit_pipeline;
+  CVMetalTextureCacheRef fit_cache;
+  CIContext *color_context;
 };
 
 static void set_error(recording_t *r, const char *message) {
@@ -115,20 +119,80 @@ static void encoded_frame(void *context, void *source, OSStatus status,
   }
 }
 
-static CVPixelBufferRef fit_frame(recording_t *r, CVPixelBufferRef frame) {
-  if (CVPixelBufferGetWidth(frame) == r->width &&
-      CVPixelBufferGetHeight(frame) == r->height) {
-    return CVPixelBufferRetain(frame);
+static bool prepare_frame_fitter(recording_t *r) {
+  if (r->fit_pipeline != nil) {
+    return true;
   }
-  CVPixelBufferRef fitted = NULL;
-  OSStatus status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault,
-      VTCompressionSessionGetPixelBufferPool(r->encoder), &fitted);
-  if (status != noErr || fitted == NULL) {
-    set_error(r, "allocate recording rotation canvas failed");
-    return NULL;
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  if (device == nil) {
+    set_error(r, "recording rotation requires a Metal device");
+    return false;
   }
-  if (r->context == nil) {
-    r->context = [[CIContext contextWithOptions:@{kCIContextCacheIntermediates: @NO}] retain];
+  r->fit_queue = [device newCommandQueue];
+  CVReturn status = CVMetalTextureCacheCreate(NULL, NULL, device, NULL, &r->fit_cache);
+  // Sample the two NV12 planes directly; no YUV/RGB round trip or CPU pixel copy.
+  NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+      "kernel void fit_nv12(texture2d<float, access::sample> input [[texture(0)]], "
+      "texture2d<float, access::write> output [[texture(1)]], "
+      "constant float4 &rect [[buffer(0)]], constant float &black [[buffer(1)]], "
+      "uint2 pos [[thread_position_in_grid]]) { "
+      "  if (pos.x >= output.get_width() || pos.y >= output.get_height()) { return; } "
+      "  float2 uv = (float2(pos) + 0.5f - rect.xy) / rect.zw; "
+      "  constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear); "
+      "  float4 value = float4(black); "
+      "  if (all(uv >= 0.0f) && all(uv < 1.0f)) { value = input.sample(s, uv); } "
+      "  output.write(value, pos); "
+      "}";
+  NSError *error = nil;
+  id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+  id<MTLFunction> function = [library newFunctionWithName:@"fit_nv12"];
+  if (function != nil && r->fit_queue != nil && status == kCVReturnSuccess) {
+    r->fit_pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+  }
+  [function release];
+  [library release];
+  [device release];
+  if (r->fit_pipeline == nil) {
+    set_error(r, error != nil ? error.localizedDescription.UTF8String
+                             : "create Metal recording frame fitter failed");
+    return false;
+  }
+  return true;
+}
+
+static bool needs_color_conversion(CVPixelBufferRef frame) {
+  CFStringRef keys[] = {kCVImageBufferYCbCrMatrixKey,
+      kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey};
+  CFStringRef values[] = {kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+      kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_709_2};
+  CVAttachmentMode modes[] = {kCVAttachmentMode_ShouldPropagate,
+                             kCVAttachmentMode_ShouldNotPropagate};
+  for (size_t mode = 0; mode < 2; mode++) {
+    CFDictionaryRef attachments = CVBufferCopyAttachments(frame, modes[mode]);
+    if (attachments == NULL) {
+      continue;
+    }
+    bool convert = false;
+    for (size_t i = 0; i < 3; i++) {
+      CFTypeRef value = CFDictionaryGetValue(attachments, keys[i]);
+      if (value != NULL && !CFEqual(value, values[i])) {
+        convert = true;
+      }
+    }
+    CFRelease(attachments);
+    if (convert) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool fit_frame_with_color_conversion(recording_t *r,
+                                            CVPixelBufferRef frame,
+                                            CVPixelBufferRef fitted) {
+  if (r->color_context == nil) {
+    r->color_context = [[CIContext contextWithMTLCommandQueue:r->fit_queue
+        options:@{kCIContextCacheIntermediates: @NO}] retain];
   }
   CIImage *image = [CIImage imageWithCVPixelBuffer:frame];
   double scale = fmin((double)r->width / CVPixelBufferGetWidth(frame),
@@ -140,13 +204,103 @@ static CVPixelBufferRef fit_frame(recording_t *r, CVPixelBufferRef frame) {
   CGRect canvas = CGRectMake(0, 0, r->width, r->height);
   CIImage *black = [[CIImage imageWithColor:[CIColor blackColor]] imageByCroppingToRect:canvas];
   image = [[image imageByCompositingOverImage:black] imageByCroppingToRect:canvas];
+  CIRenderDestination *destination = [[CIRenderDestination alloc] initWithPixelBuffer:fitted];
+  NSError *error = nil;
+  CIRenderTask *task = [r->color_context startTaskToRender:image
+      toDestination:destination error:&error];
+  bool success = task != nil && [task waitUntilCompletedAndReturnError:&error] != nil;
+  [destination release];
+  if (!success) {
+    set_error(r, error != nil ? error.localizedDescription.UTF8String
+                             : "Metal recording color conversion failed");
+  }
+  return success;
+}
+
+static CVPixelBufferRef fit_frame(recording_t *r, CVPixelBufferRef frame) {
+  if (CVPixelBufferGetWidth(frame) == r->width &&
+      CVPixelBufferGetHeight(frame) == r->height) {
+    return CVPixelBufferRetain(frame);
+  }
+  if (!prepare_frame_fitter(r)) {
+    return NULL;
+  }
+  CVPixelBufferRef fitted = NULL;
+  OSStatus status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault,
+      VTCompressionSessionGetPixelBufferPool(r->encoder), &fitted);
+  if (status != noErr || fitted == NULL) {
+    set_error(r, "allocate recording rotation canvas failed");
+    return NULL;
+  }
   CVBufferSetAttachment(fitted, kCVImageBufferYCbCrMatrixKey,
       kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
   CVBufferSetAttachment(fitted, kCVImageBufferColorPrimariesKey,
       kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
   CVBufferSetAttachment(fitted, kCVImageBufferTransferFunctionKey,
       kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-  [r->context render:image toCVPixelBuffer:fitted];
+  // Preserve the old color-managed fitting for explicitly non-BT.709 input.
+  if (needs_color_conversion(frame)) {
+    if (!fit_frame_with_color_conversion(r, frame, fitted)) {
+      CVPixelBufferRelease(fitted);
+      return NULL;
+    }
+    return fitted;
+  }
+  CVMetalTextureRef textures[4] = {NULL};
+  id<MTLCommandBuffer> command = [r->fit_queue commandBuffer];
+  id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+  bool success = encoder != nil;
+  if (!success) {
+    set_error(r, "create Metal recording command failed");
+  }
+  [encoder setComputePipelineState:r->fit_pipeline];
+  double scale = fmin((double)r->width / CVPixelBufferGetWidth(frame),
+                     (double)r->height / CVPixelBufferGetHeight(frame));
+  for (size_t plane = 0; plane < 2 && success; plane++) {
+    size_t sw = CVPixelBufferGetWidthOfPlane(frame, plane);
+    size_t sh = CVPixelBufferGetHeightOfPlane(frame, plane);
+    size_t dw = CVPixelBufferGetWidthOfPlane(fitted, plane);
+    size_t dh = CVPixelBufferGetHeightOfPlane(fitted, plane);
+    MTLPixelFormat format = plane == 0 ? MTLPixelFormatR8Unorm : MTLPixelFormatRG8Unorm;
+    CVReturn input_status = CVMetalTextureCacheCreateTextureFromImage(NULL,
+        r->fit_cache, frame, NULL, format, sw, sh, plane, &textures[2 * plane]);
+    CVReturn output_status = CVMetalTextureCacheCreateTextureFromImage(NULL,
+        r->fit_cache, fitted, NULL, format, dw, dh, plane, &textures[2 * plane + 1]);
+    if (input_status != kCVReturnSuccess || output_status != kCVReturnSuccess) {
+      set_error(r, "map NV12 recording planes to Metal textures failed");
+      success = false;
+      break;
+    }
+    [encoder setTexture:CVMetalTextureGetTexture(textures[2 * plane]) atIndex:0];
+    [encoder setTexture:CVMetalTextureGetTexture(textures[2 * plane + 1]) atIndex:1];
+    float rect[4] = {(dw - sw * scale) / 2, (dh - sh * scale) / 2,
+                    sw * scale, sh * scale};
+    float black = (plane == 0 ? 16.0f : 128.0f) / 255;
+    [encoder setBytes:rect length:sizeof(rect) atIndex:0];
+    [encoder setBytes:&black length:sizeof(black) atIndex:1];
+    [encoder dispatchThreads:MTLSizeMake(dw, dh, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+  }
+  [encoder endEncoding];
+  if (success) {
+    [command commit];
+    // The recorder queue owns these buffers until GPU writes finish. Never wait
+    // in the decoder observer, and never submit an unfinished surface to VTB.
+    [command waitUntilCompleted];
+    success = command.status == MTLCommandBufferStatusCompleted;
+    if (!success) {
+      set_error(r, "Metal recording frame fitting failed");
+    }
+  }
+  for (size_t i = 0; i < 4; i++) {
+    if (textures[i] != NULL) {
+      CFRelease(textures[i]);
+    }
+  }
+  if (!success) {
+    CVPixelBufferRelease(fitted);
+    return NULL;
+  }
   return fitted;
 }
 
@@ -290,8 +444,16 @@ static void destroy_resources(recording_t *r) {
   r->audio = nil;
   [r->writer release];
   r->writer = nil;
-  [r->context release];
-  r->context = nil;
+  [r->color_context release];
+  r->color_context = nil;
+  [r->fit_pipeline release];
+  r->fit_pipeline = nil;
+  [r->fit_queue release];
+  r->fit_queue = nil;
+  if (r->fit_cache != NULL) {
+    CFRelease(r->fit_cache);
+    r->fit_cache = NULL;
+  }
   [r->first_audio release];
   r->first_audio = nil;
   [r->last_audio release];
@@ -300,7 +462,7 @@ static void destroy_resources(recording_t *r) {
 
 recording_t *recording_create(CVPixelBufferRef frame, const char *path,
                               const uint8_t *config, size_t config_size,
-                              int64_t source_pts, int fps, char error[512]) {
+                              int64_t source_pts, int fps, double quality, char error[512]) {
   @autoreleasepool {
     recording_t *r = calloc(1, sizeof(*r));
     atomic_init(&r->references, 1);
@@ -328,8 +490,9 @@ recording_t *recording_create(CVPixelBufferRef frame, const char *path,
       (id)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES,
       (id)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES};
     NSDictionary *attributes = @{
-      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-      (id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
     if (r->error[0] == '\0') {
       OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault, (int)r->width,
           (int)r->height, kCMVideoCodecType_H264, (CFDictionaryRef)specification,
@@ -341,6 +504,7 @@ recording_t *recording_create(CVPixelBufferRef frame, const char *path,
     if (r->error[0] == '\0') {
       NSDictionary *properties = @{
         (id)kVTCompressionPropertyKey_RealTime: @YES,
+        (id)kVTCompressionPropertyKey_Quality: @(quality),
         (id)kVTCompressionPropertyKey_ColorPrimaries: (id)kCVImageBufferColorPrimaries_ITU_R_709_2,
         (id)kVTCompressionPropertyKey_TransferFunction: (id)kCVImageBufferTransferFunction_ITU_R_709_2,
         (id)kVTCompressionPropertyKey_YCbCrMatrix: (id)kCVImageBufferYCbCrMatrix_ITU_R_709_2,
@@ -353,6 +517,10 @@ recording_t *recording_create(CVPixelBufferRef frame, const char *path,
       if (status != noErr) {
         set_error(r, "configure hardware H.264 recording encoder failed");
       }
+    }
+    // Prepare at start, so the first orientation change does not compile a shader.
+    if (r->error[0] == '\0') {
+      prepare_frame_fitter(r);
     }
     if (r->error[0] == '\0') {
       encode_frame(r, frame, 0, 0, true);

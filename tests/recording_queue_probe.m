@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
     CVPixelBufferUnlockBaseAddress(frame, 0);
     const uint8_t config[] = {0x11, 0x90};
     char error[512] = {0};
-    recording_t *r = recording_create(frame, argv[1], config, 2, 0, 30, error);
+    recording_t *r = recording_create(frame, argv[1], config, 2, 0, 30, 0.625, error);
     assert(r != NULL);
     CFTypeRef hardware = NULL;
     assert(VTSessionCopyProperty(r->encoder,
@@ -43,6 +43,14 @@ int main(int argc, char **argv) {
         kCFAllocatorDefault, &hardware) == noErr);
     assert(CFEqual(hardware, kCFBooleanTrue));
     CFRelease(hardware);
+    CFTypeRef quality = NULL;
+    assert(VTSessionCopyProperty(r->encoder, kVTCompressionPropertyKey_Quality,
+        kCFAllocatorDefault, &quality) == noErr);
+    assert(quality != NULL && CFGetTypeID(quality) == CFNumberGetTypeID());
+    double actual_quality = 0;
+    assert(CFNumberGetValue(quality, kCFNumberDoubleType, &actual_quality));
+    assert(fabs(actual_quality - 0.625) < 0.000001);
+    CFRelease(quality);
     dispatch_semaphore_t gate = dispatch_semaphore_create(0);
     dispatch_async(r->queue, ^{
       dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER);
@@ -73,7 +81,7 @@ int main(int argc, char **argv) {
     IMP original_copy = method_setImplementation(copy_method, (IMP)fail_copy);
     for (copy_failure = 1; copy_failure <= 2; copy_failure++) {
       NSString *path = [NSString stringWithFormat:@"%s-copy-%d.mp4", argv[1], copy_failure];
-      r = recording_create(frame, path.UTF8String, NULL, 0, 0, 30, error);
+      r = recording_create(frame, path.UTF8String, NULL, 0, 0, 30, 0.75, error);
       assert(r != NULL);
       NSData *original = [NSData dataWithContentsOfFile:path];
       r->audio_gap_count = 1;

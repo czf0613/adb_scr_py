@@ -73,7 +73,8 @@ class H264DecoderBase(ABC):
 
     @abstractmethod
     async def start_recording(
-        self, output_file: str, audio_config: bytes | None, source_pts: int, fps: int
+        self, output_file: str, audio_config: bytes | None, source_pts: int, fps: int,
+        quality: float = 0.75,
     ) -> "RecordingHandle":
         """从当前原生帧开始录制并订阅后续解码输出，返回原生录制句柄。"""
 

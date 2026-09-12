@@ -7,7 +7,7 @@
 ## 安装
 
 - Python 3.10 或更高版本；本地开发使用普通 3.14。支持 free-threaded CPython，已验证 3.14t；需要对应 ABI 的构建，详见 [Python 兼容性](docs/python-compatibility.md)。
-- macOS，使用 VideoToolbox 硬件解码器。源码支持构建 arm64/x86_64，具体 wheel 可用性以发布文件为准。
+- macOS，使用 VideoToolbox 硬件编解码和部分 Metal 特性，**推荐 Apple silicon**。不保证 Intel Mac 能正常使用；源码仍允许构建 x86_64，具体 wheel 可用性以发布文件为准。
 - 已安装 ADB，设备已授权 USB 调试，或已具备 ADB 网络调试条件。
 
 ```bash
@@ -93,14 +93,14 @@ EOF、接收/发送失败、服务端进程退出或设备存活探测连续失�
 连接成功且首帧已经解码后：
 
 ```python
-await device.start_recording("capture.mp4")
+await device.start_recording("capture.mp4", quality=0.75)  # 默认 0.75，可传 0.0–1.0
 try:
     await asyncio.sleep(5)  # 此期间仍可截图或操作设备
 finally:
     await device.stop_recording()  # 等待 MP4 封装完成后再读取文件
 ```
 
-开始时使用缓存画面立即生成关键帧，停止时补足静止画面的持续时间；录制期间没有新视频包也能生成有效文件。视频使用 VideoToolbox 硬件 H.264 编码，码率和画质采用系统默认设置；音频直接封装手机回传的 AAC，不重新编码。输出尺寸固定为首帧尺寸，旋转后等比适配并居中留黑。不覆盖已有文件，也不自动创建父目录。
+开始时使用缓存画面立即生成关键帧，停止时补足静止画面的持续时间；录制期间没有新视频包也能生成有效文件。视频使用 VideoToolbox 硬件 H.264 编码，通过 `quality` 控制画质与体积的取舍，默认 `0.75`，不指定固定码率；音频直接封装手机回传的 AAC，不重新编码。录制要求可用的 Metal 设备，输出尺寸固定为首帧尺寸，旋转后由 GPU 直接缩放 NV12 平面并居中留黑。`quality` 越高通常画质越好、文件越大；它不是体积比例，`1.0` 不保证 H.264 无损，实际体积取决于画面和硬件。不覆盖已有文件，也不自动创建父目录。
 
 连接时自动读取 Android API 级别并开启支持的音源：Android 13+ 使用 `playback + audio_dup` 保留手机播放声音；Android 11–12L 使用 `output`，采集期间手机静音（从连接开始，即使尚未录制）；Android 11 启动时还需要解锁屏幕。Android 10 及以下不启用音频。服务端明确禁用音频时保留视频连接，开始录制会记录警告并生成纯视频文件。应用可以限制音频采集，系统行为见 [scrcpy 音频说明](https://github.com/Genymobile/scrcpy/blob/v3.2/doc/audio.md)。
 
@@ -127,7 +127,7 @@ uv run --python 3.14 --locked --extra mcp adb-scr-mcp --port 8000
 | `set_screen_record_fps(fps)` | 设置后续会话的帧率上限 |
 | `ConnectionOptions(...)` | 配置连接、I/O、关闭及存活探测 |
 | `AndroidDevice(...)` | 设备会话、截图及控制 API |
-| `await device.start_recording(output_file)` / `await device.stop_recording()` | 开始录制及等待 MP4 文件完成 |
+| `await device.start_recording(output_file, quality=0.75)` / `await device.stop_recording()` | 开始录制及等待 MP4 文件完成 |
 | `GestureAction` / `GestureActionNode` | 通过 `pointer_id` 区分手指的单指/多指手势序列 |
 | `await deinit_lib()` | 所有设备关闭后停止共享 daemon |
 

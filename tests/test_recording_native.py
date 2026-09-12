@@ -29,6 +29,30 @@ def test_native_recording_api_exists():
     assert hasattr(media, "start_recording"), "native recording API missing"
 
 
+@pytest.mark.parametrize("quality", [0.0, 0.4, 0.75, 1.0])
+def test_native_recording_accepts_quality(synthetic, tmp_path, quality):
+    decoder = decoder_for(synthetic)
+    try:
+        path = tmp_path / "quality.mp4"
+        recording = media.start_recording(decoder, str(path), None, 5_000_000, 30, quality)
+        media.set_decoder_recording(decoder, None)
+        media.stop_recording(recording, 6_000_000)
+        assert probe(path)["streams"][0]["codec_name"] == "h264"
+    finally:
+        media.destroy_decoder(decoder)
+
+
+@pytest.mark.parametrize("quality, error", [
+    (-0.01, ValueError), (1.01, ValueError), (float("nan"), ValueError),
+    (float("inf"), ValueError), (True, TypeError), ("0.75", TypeError), (None, TypeError),
+])
+def test_native_recording_rejects_invalid_quality_before_file_creation(tmp_path, quality, error):
+    path = tmp_path / "invalid.mp4"
+    with pytest.raises(error, match="quality"):
+        media.start_recording(None, str(path), None, 0, 30, quality)
+    assert not path.exists()
+
+
 @pytest.fixture(scope="module")
 def synthetic(tmp_path_factory):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
@@ -161,6 +185,22 @@ def test_rotation_rebind_and_decoder_destroy_preserve_recording(synthetic, tmp_p
     assert raw[center + 1] > 180 and raw[center] < 60
 
 
+def test_rotation_fit_preserves_nv12_planes_and_black_levels(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    binary = tmp_path / "recording-fit"
+    command = ["clang", "-O3", "-fblocks",
+               "-I" + str(root / "native_code/macOS/include"),
+               "-I" + str(root / "native_code/macOS/src"),
+               str(root / "tests/recording_fit_probe.m"), "-o", str(binary)]
+    for framework in ["AVFoundation", "AudioToolbox", "CoreMedia", "CoreVideo",
+                      "CoreFoundation", "Foundation", "CoreImage", "VideoToolbox",
+                      "CoreGraphics", "Metal"]:
+        command.extend(["-framework", framework])
+    subprocess.run(command, check=True, capture_output=True)
+    result = subprocess.run([str(binary)], capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
 def test_concurrent_stop_close_and_repeated_recordings(synthetic, tmp_path):
     with concurrent.futures.ThreadPoolExecutor(4) as pool:
         for index in range(4):
@@ -287,7 +327,7 @@ def test_recording_queue_stays_bounded_and_failure_drains(synthetic, tmp_path):
                "-I" + str(root / "native_code/macOS/src"),
                str(root / "tests/recording_queue_probe.m"), "-o", str(binary)]
     for framework in ["AVFoundation", "AudioToolbox", "CoreMedia", "CoreVideo",
-                      "CoreFoundation", "Foundation", "CoreImage", "VideoToolbox", "CoreGraphics"]:
+                      "CoreFoundation", "Foundation", "CoreImage", "VideoToolbox", "CoreGraphics", "Metal"]:
         command.extend(["-framework", framework])
     subprocess.run(command, check=True, capture_output=True)
     packet = tmp_path / "packet.aac"

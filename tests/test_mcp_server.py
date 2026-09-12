@@ -11,6 +11,32 @@ import adb_scr
 from adb_scr_mcp import create_app
 
 
+def test_recording_quality_schema_and_forwarding(fake_adb, tmp_path):
+    async def run():
+        _, instances, _ = fake_adb
+        async with client_for(create_app()) as client:
+            catalog = await rpc(client, "tools/list")
+            tool = next(tool for tool in catalog["tools"] if tool["name"] == "start_recording")
+            field = tool["inputSchema"]["properties"]["quality"]
+            assert field["default"] == 0.75
+            assert field["minimum"] == 0.0 and field["maximum"] == 1.0
+            await call(client, "connect_device", serial="phone")
+            for quality in [-0.1, 1.1, True, "0.75"]:
+                result = await call(client, "start_recording", serial="phone",
+                                    output_file=str(tmp_path / "invalid.mp4"), quality=quality)
+                assert result["isError"]
+            assert instances[0].calls == []
+            for options, expected in [({}, 0.75), ({"quality": 0.45}, 0.45),
+                                      ({"quality": 0}, 0.0), ({"quality": 1}, 1.0)]:
+                output = str(tmp_path / f"quality-{expected}.mp4")
+                result = await call(client, "start_recording", serial="phone",
+                                    output_file=output, **options)
+                assert not result["isError"]
+                assert instances[0].calls[-1] == ("start_recording", output, expected)
+
+    asyncio.run(run())
+
+
 @pytest.fixture
 def fake_adb(monkeypatch):
     events = []
@@ -65,8 +91,8 @@ def fake_adb(monkeypatch):
             self.calls.append(("stop", package_name))
             return True
 
-        async def start_recording(self, output_file):
-            self.calls.append(("start_recording", output_file))
+        async def start_recording(self, output_file, quality=0.75):
+            self.calls.append(("start_recording", output_file, quality))
 
         async def stop_recording(self):
             self.calls.append(("stop_recording",))
@@ -453,7 +479,7 @@ def test_control_and_recording_tools_preserve_arguments(
                         adb_scr.GestureActionNode(3, 4, adb_scr.GestureAction.UP, 5, 4),
                     ],
                 ),
-                ("start_recording", output),
+                ("start_recording", output, 0.75),
                 ("stop_recording",),
             ]
 

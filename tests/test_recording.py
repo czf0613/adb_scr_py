@@ -17,9 +17,9 @@ def install_native(monkeypatch):
     calls = []
     clock = [1_000_000]
 
-    def create(decoder, path, config, origin, fps):
+    def create(decoder, path, config, origin, fps, quality):
         result = object()
-        calls.append(("start", result, path, config, origin, fps))
+        calls.append(("start", result, path, config, origin, fps, quality))
         return result
 
     def attach(decoder, recorder):
@@ -52,6 +52,39 @@ def handle_with_frame():
     handle.running = True
     handle.h264_decoder = decoder()
     return handle
+
+
+@pytest.mark.parametrize("options, expected", [({}, 0.75), ({"quality": 0.4}, 0.4),
+                                               ({"quality": 0}, 0.0), ({"quality": 1}, 1.0)])
+def test_public_recording_quality_reaches_native_encoder(monkeypatch, options, expected):
+    async def run():
+        _, calls, _ = install_native(monkeypatch)
+        handle = handle_with_frame()
+        handle.recording.observe_pts(0)
+        device = AndroidDevice("synthetic", "usb")
+        device.control_handle = handle
+        device.scrcpy_server_process = SimpleNamespace(returncode=None)
+        await device.start_recording("quality.mp4", **options)
+        assert calls[0][-1] == expected
+        await device.stop_recording()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("quality, error", [
+    (-0.01, ValueError), (1.01, ValueError), (float("nan"), ValueError),
+    (float("inf"), ValueError), (float("-inf"), ValueError),
+    (True, TypeError), (False, TypeError), ("0.75", TypeError), (None, TypeError),
+])
+def test_invalid_recording_quality_is_rejected_before_native_work(monkeypatch, quality, error):
+    async def run():
+        _, calls, _ = install_native(monkeypatch)
+        handle = handle_with_frame()
+        with pytest.raises(error, match="quality"):
+            await handle.recording.start("invalid.mp4", quality=quality)
+        assert not calls
+
+    asyncio.run(run())
 
 
 def test_start_uses_current_clock_not_old_static_frame_and_stop_detaches(monkeypatch):

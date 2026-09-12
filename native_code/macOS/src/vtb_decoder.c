@@ -66,14 +66,16 @@ int32_t vtb_create_decoder(const uint8_t *sps_and_pps, size_t sps_and_pps_size,
   // 指定输出NV12
   CFStringRef dest_attr_keys[] = {
       kCVPixelBufferPixelFormatTypeKey,
+      kCVPixelBufferMetalCompatibilityKey,
   };
   int32_t nv12_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-  CFNumberRef dest_attr_values[] = {
+  CFTypeRef dest_attr_values[] = {
       CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &nv12_format),
+      kCFBooleanTrue,
   };
   CFDictionaryRef dest_attrs = CFDictionaryCreate(
       kCFAllocatorDefault, (const void **)dest_attr_keys,
-      (const void **)dest_attr_values, 1, &kCFTypeDictionaryKeyCallBacks,
+      (const void **)dest_attr_values, 2, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
 
   // 创建解码器
