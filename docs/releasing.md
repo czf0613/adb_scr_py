@@ -7,7 +7,10 @@
 ## 产物与兼容范围
 
 在 `macos-15` 上设置 `MACOSX_DEPLOYMENT_TARGET=15.0`、`ARCHFLAGS=-arch arm64`，
-每种 Python 独立构建原生扩展、sdist，再从 sdist 构建 wheel。发布的 wheel 标签为：
+每种 Python 独立构建原生扩展、sdist，再从 sdist 构建 wheel。构建 wheel 时通过
+`--config-setting=--build-option=--plat-name=macosx-15.0-arm64` 显式设置平台标签，
+避免继承 runner 中 universal2 Python 的标签；同时通过 `lipo` 检查实际扩展仅含
+arm64。发布的 wheel 标签为：
 
 | Python | Python / ABI / 平台标签 |
 | --- | --- |
@@ -26,6 +29,8 @@
 两边复用 `check_ci.py` 验证已安装 wheel、归档内容、ABI、无设备测试和 GIL 状态。
 云端不覆盖真实 VideoToolbox 媒体硬件；验证边界及本地硬件测试见 [CI 文档](ci.md)。
 普通 3.14 显式选择 `3.14+gil`，3.14t 独立构建，不强制设置 GIL 状态。
+构建与 Ubuntu 汇总任务先用 `uv python install` 安装解释器，再运行版本选择；
+普通 3.14 安装请求为 `3.14`，运行选择为 `3.14+gil`，避免无可用下载的 `+gil` 请求。
 
 12 个构建/安装测试任务全部成功后，`prepare_release.py` 检查六种 wheel 是否齐全、
 平台/ABI 是否正确、文件名与包元数据版本是否一致，然后选择一份 sdist。
