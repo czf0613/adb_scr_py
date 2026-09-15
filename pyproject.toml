@@ -10,7 +10,10 @@ requires-python = ">=3.10"
 classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
     "Programming Language :: C",
+    "Programming Language :: C++",
 ]
 dependencies = ["aiofiles>=25.1.0"]
 

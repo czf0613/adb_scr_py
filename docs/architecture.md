@@ -4,9 +4,9 @@
 
 ## 定位与边界
 
-`adb_scr_py` 的 Python 导入名为 `adb_scr`，通过 ADB 和 scrcpy 3.2 控制 Android 并接收 H.264 视频。最低支持 Python 3.10，默认开发版本为 3.14。原生媒体实现仅支持 macOS，并要求 VideoToolbox 硬件解码。
+`adb_scr_py` 的 Python 导入名为 `adb_scr`，通过 ADB 和 scrcpy 3.2 控制 Android 并接收 H.264 视频。最低支持 Python 3.10，默认开发版本为 3.14。原生媒体实现支持 macOS VideoToolbox 和 Windows Media Foundation。macOS 要求硬件解码；Windows 仅提供加速提示，不检测或强制实际硬件使用。Windows 的实现及测试边界见 [windows.md](windows.md)。
 
-库缓存最新 NV12 解码帧，按需用 Accelerate/vImage 转成 BGRA8，服务于高频 NumPy/OpenCV 图像处理。顶层 `AndroidDevice.get_screenshot_jpg()` 直接从 CVPixelBuffer 编码 JPEG，支持质量、缩放比例及原图 ROI；调用者无需选择底层编码路径。内部控制句柄仍可返回原始 BGRA8 bytes，原生 `bgra8_to_jpg()` 工具函数也继续保留。没有历史帧队列或自动重连。屏幕录制订阅同一原生 NV12 帧，独立使用 VideoToolbox 编码 H.264，并将 scrcpy 回传的 AAC 直接封装进 MP4。
+库缓存最新 NV12 解码帧，按需用平台系统媒体能力转成紧密排列的 BGRA8，服务于高频 NumPy/OpenCV 图像处理。顶层 `AndroidDevice.get_screenshot_jpg()` 从原生帧快照编码 JPEG，支持质量、缩放比例及原图 ROI；调用者无需选择底层编码路径。内部控制句柄仍可返回原始 BGRA8 bytes，原生 `bgra8_to_jpg()` 工具函数也继续保留。没有历史帧队列或自动重连。屏幕录制订阅同一原生 NV12 帧，通过 VideoToolbox 或 Windows 系统 MFT 编码 H.264，并将 scrcpy 回传的 AAC 直接封装进 MP4。
 
 ## 模块与数据流
 
@@ -21,16 +21,16 @@ flowchart TD
     ADB --> Phone[Android / scrcpy-server]
     Phone -->|H.264 / AAC| Handle
     Handle -->|控制消息| Phone
-    Handle --> Decoder[VtbH264Decoder]
-    Decoder --> Native[Capsule 容器 / VideoToolbox / GCD]
+    Handle --> Decoder[VtbH264Decoder / MfH264Decoder]
+    Decoder --> Native[Capsule / VideoToolbox 或 Media Foundation]
     Native --> BGRA[BGRA8 bytes]
     BGRA --> CV[NumPy / OpenCV]
-    BGRA --> JPEG[ImageIO JPEG]
+    BGRA --> JPEG[ImageIO / WIC JPEG]
     Native --> Snapshot[retain 最新 NV12 快照]
-    Snapshot --> Direct[VideoToolbox 硬件 JPEG / Core Image]
+    Snapshot --> Direct[VideoToolbox / Core Image 或 Windows 视频处理器 / WIC]
     Direct --> Bytes[JPEG bytes]
     Native --> Recorder[原生帧订阅 / H.264 重编码]
-    Handle -->|原始 AAC 包| Mux[AVAssetWriter / MP4]
+    Handle -->|原始 AAC 包| Mux[AVAssetWriter 或 SinkWriter / MP4]
     Recorder --> Mux
 ```
 
@@ -56,6 +56,34 @@ flowchart TD
 | `vtb_helper.c` | Annex B 处理及 NV12 → BGRA8 转换 |
 | `jpg_encoder.c` | ImageIO/CoreGraphics JPEG 编码 |
 | `frame_jpg_encoder.m` | NV12 直接编码 JPEG；复用硬件会话及 Core Image 上下文，裁剪、缩放和回退 |
+
+## Windows 线程与媒体边界
+
+`native_code/Windows/include/media.h` 声明共享 COM/队列/快照契约；
+`common.cpp` 管理 COM/MF、D3D11 提示及有界工作队列；`decoder.cpp` 驱动
+H.264 MFT 并保留最新 NV12；`image.cpp` 使用 VideoProcessorMFT/WIC；
+`recording.cpp` 使用 SinkWriter 完成 H.264 质量编码和 AAC 直通；
+`binding.cpp` 提供同名原生 API、独立快照所有权及 Python 线程状态分离。
+Python 工厂选择 `MfH264Decoder`，上层连接与控制协议不变。
+
+Windows 解码队列最多 32 项/64 MiB；录制待编码视频最多八帧独立 NV12，AAC 最多
+256 包/4 MiB；录制总队列最多 256 项/128 MiB。提交录制时在解码 MTA 线程
+复制像素，避免编码积压持有解码表面。SinkWriter 禁用默认阻塞限流，并独立
+限制未处理视频 32 样本/128 MiB、AAC 256 包/4 MiB。最旧任务/未处理样本超过 5 秒同样
+记为过载。超限持久抛 `MediaPipelineOverloadedError`，停止相应媒体管线。
+每会话的独立监控每 100 ms 检查原生错误；`wait_media_error()` 唤醒并抛
+原始异常。解码错误关闭会话，录制错误只停止录制；正常断连让等待返回。
+SinkWriter 积压统计检查也在录制工作线程内运行，监控最多挂一个检查任务。
+连续音频比 pending 视频领先 1 秒时，以同一画面补齐到音频 PTS 前 500 ms，
+让 MP4 sink 继续消费 AAC；落后已提交区间的视频使录制失败，不能丢帧继续。
+录制检查与 start/stop 共用锁，防止旧录制的延迟错误伤及新录制。
+
+BGRA8 固定自顶向下、width*4 行步长、width*height*4 字节、alpha=255。
+跨线程快照持有 MF/D3D 生命周期；系统内存 RGB 明确正步长，带 padding
+的表面通过系统 `MFCopyImage` 打包。录制旋转使用视频处理器并显式规范
+NV12 黑边。Windows MP4 最短时长为 1 毫秒，AAC 大间隙/重叠明确失败；
+没有移植 macOS 的空编辑修复。下文 VideoToolbox/GCD/Metal 的具体实现
+描述属于 macOS；Windows 对应细节及限制见 [Windows 文档](windows.md)。
 
 ## 初始化与连接所有权
 
@@ -93,6 +121,10 @@ FPS 是下一次启动服务端使用的进程级上限，不影响已运行会�
 `action_series(check=True)` 在发送之前完整检查列表，按 ID 维护已按下的手指集合。DOWN 只能加入未按下的 ID；MOVE/UP 必须对应已按下的 ID，UP 将其移出；结束时集合必须为空。同一 ID 抬起后可以复用，不同 ID 可以交错操作，最多同时按下 10 根手指。单看 DOWN/UP 总数无法识别错误的手指配对。所有模式均预先检查坐标和 ID 的整数范围（0 到 `2**63 - 1`）；check=False 只跳过数量、时长和状态校验。
 
 校验失败记录日志并返回，不发送任何节点。校验成功后仍在设备锁内逐个发送及等待；节点顺序和每个节点后的随机间隔保持原有语义。该校验仅针对本次列表，不追踪跨调用触点，也不保证断连/取消后最终 UP 的送达。
+
+节点的 `duration_ms=0` 不等待；正值在 `max(1, duration_ms - 10)` 到
+`duration_ms + 10` 毫秒间取随机整数作为等待目标。下界必须用 max 保证
+短节点仍为正值、长节点不会被缩短到接近零；实际耗时还包含调度延迟。
 
 ## 关闭与取消
 

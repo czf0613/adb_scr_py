@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from adb_scr.media_ext import _adb_scr_media as media
 
 @pytest.fixture(scope="module")
 def apple_reader(tmp_path_factory):
+    if sys.platform != "darwin":
+        pytest.skip("AVFoundation reader requires macOS")
     root = Path(__file__).resolve().parents[1]
     binary = tmp_path_factory.mktemp("apple-reader") / "reader"
     subprocess.run(["clang", str(root / "tests/recording_reader_probe.m"),
@@ -55,6 +58,8 @@ def test_native_recording_rejects_invalid_quality_before_file_creation(tmp_path,
 
 @pytest.fixture(scope="module")
 def synthetic(tmp_path_factory):
+    if sys.platform != "darwin":
+        pytest.skip("AVFoundation recording fixtures; Windows has system-codec tests")
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("ffmpeg/ffprobe required for synthetic recording fixtures")
     directory = tmp_path_factory.mktemp("recording-media")
@@ -185,6 +190,7 @@ def test_rotation_rebind_and_decoder_destroy_preserve_recording(synthetic, tmp_p
     assert raw[center + 1] > 180 and raw[center] < 60
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Apple NV12 fit probe requires macOS")
 def test_rotation_fit_preserves_nv12_planes_and_black_levels(tmp_path):
     root = Path(__file__).resolve().parents[1]
     binary = tmp_path / "recording-fit"

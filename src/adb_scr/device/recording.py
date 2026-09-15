@@ -105,7 +105,30 @@ class RecordingController:
                 )
             except Exception as error:
                 self.fail(error)
-                raise
+                if not hasattr(_media, "check_recording_error"):
+                    raise
+                await self._report_native_failure(error)
+
+    async def _report_native_failure(self, error: Exception) -> None:
+        # Called with the recording mutex held: do not fail a newer recording
+        # if stop/start runs while a native status check is in progress.
+        self.fail(error)
+        self.owner._fail_media(error)
+        try:
+            await complete_on_cancel(self._finish())
+        except Exception:
+            pass  # wait_media_error() and stop() retain the original failure.
+
+    async def check_error(self) -> None:
+        async with self._mutex:
+            if self.active is None:
+                return
+            try:
+                await complete_on_cancel(
+                    asyncio.to_thread(_media.check_recording_error, self.active)
+                )
+            except Exception as error:
+                await self._report_native_failure(error)
 
     async def _finish(self) -> None:
         if self.active is None:

@@ -116,7 +116,7 @@ async def start_recording(output_file: str, quality: float = 0.75) -> None: ...
 async def stop_recording() -> None: ...
 ```
 
-这两个方法属于 `AndroidDevice`。`start_recording()` 成功表示已创建录制并生成首个 H.264 关键帧；首帧取自当前已解码画面，无需等待手机产生新帧或新 I 帧。没有已解码画面时抛出 `RuntimeError`，连接成功本身不保证首帧已到。每个设备只允许一个活动录制，重复开始抛出 `RuntimeError`。
+这两个方法属于 `AndroidDevice`。`start_recording()` 成功表示已创建录制；macOS 已生成首个 H.264 关键帧，Windows 已向 SinkWriter 提交首帧；首帧取自当前已解码画面，无需等待手机产生新帧或新 I 帧。没有已解码画面时抛出 `RuntimeError`，连接成功本身不保证首帧已到。每个设备只允许一个活动录制，重复开始抛出 `RuntimeError`。
 
 `output_file` 必须为非空、无 NUL 的字符串。不根据后缀猜容器，输出始终为 MP4；不覆盖已有文件，不创建父目录。路径类型错误抛出 `TypeError`，空路径/NUL 抛出 `ValueError`；文件和编码器错误抛出 `OSError` 或 `RuntimeError`。`stop_recording()` 返回后文件才完成封装，运行期间不保证可供播放器打开。
 
@@ -126,7 +126,7 @@ async def stop_recording() -> None: ...
 
 AAC 包直接封装，不解码/重新编码音频。音视频共用设备 PTS，开始时间通过媒体 PTS 与本机单调时钟映射确定，不使用久未变化的视频 PTS 充当当前时间。音频以完整 AAC 包为边界，48 kHz 下 1024 个采样约为 21.3 ms；不承诺采样级裁剪或跨设备硬实时同步。
 
-一包以内的音频时间戳抖动按连续采样时钟处理；超过一包的向前跳变保留静默区间。这类文件在停止时通过 macOS 原生接口修正 MP4 时间线，使用同目录临时副本并在成功后原子替换，不重新编码音视频；停止所需时间和临时磁盘空间会增加。时间戳向后重叠超过一包，或一份录制超过 4096 个间隔时报告错误。
+一包以内的音频时间戳抖动按连续采样时钟处理；macOS 超过一包的向前跳变保留静默区间。Windows 首版对超过一包的累计间隙或重叠抛出持久错误，不静默压缩时间轴。这类文件在停止时通过 macOS 原生接口修正 MP4 时间线，使用同目录临时副本并在成功后原子替换，不重新编码音视频；停止所需时间和临时磁盘空间会增加。时间戳向后重叠超过一包，或一份录制超过 4096 个间隔时报告错误。
 
 | Android API 级别 | 连接时的音频行为 |
 | --- | --- |
@@ -205,6 +205,10 @@ await device.action_series([
 
 节点仍按列表顺序发送；“多指”表示多个触点可同时保持按下，不是同时提交整批坐标。状态校验针对当前列表，断连或取消仍可能中断已开始的手势，不能保证手机收到最终 UP。
 
+`duration_ms=0` 不等待；正值的等待目标是在 `max(1, duration_ms - 10)`
+到 `duration_ms + 10` 毫秒之间的随机整数，最后一个节点也适用。系统调度
+可能延长实际耗时，因此该接口不提供精确计时保证。
+
 ## 原生 API 与异常
 
 `adb_scr.media_ext._adb_scr_media` 属于底层接口。完整类型与参数约束见 [`_adb_scr_media.pyi`](../src/adb_scr/media_ext/_adb_scr_media.pyi)。输入须符合存根约定；类型注解不代替运行时验证。
@@ -214,3 +218,17 @@ await device.action_series([
 创建、取帧、JPEG 编码和销毁须从异步路径调度到工作线程。原生耗时操作分离 Python 线程状态，在普通 CPython 下释放 GIL；这不会让同步函数变为异步函数。Python 设备对象、库初始化/反初始化及模块配置仍在同一事件循环内管理，asyncio 锁不提供跨线程保证。取消协程不停止在途原生操作；库会等待相应操作完成，避免释放仍被工作线程使用的资源。VideoToolbox/GCD 销毁没有强制超时。
 
 公开异常位于 `adb_scr.exceptions`：`AdbScrPyException`、`AdbScrPyInitException`、`AdbScrPyH264DecoderException`。设备 `connect()` 将普通连接异常转换成 False，`asyncio.CancelledError` 在清理后传播。
+
+## Windows 后台媒体错误
+
+`await device.wait_media_error()` 绑定调用时的会话，等待错误后抛出原始异常；
+未连接或正常停止时返回 None。取消等待不关闭会话，新连接重置会话错误。
+系统错误为 RuntimeError，队列容量/延迟超限为
+`adb_scr.exceptions.MediaPipelineOverloadedError`（也是 RuntimeError）。
+Windows 每 100 ms 检查后台错误，无需新视频包：解码错误关闭会话，后续截图
+仍抛原错误；录制错误停止文件写入并保留视频/控制连接，stop_recording 仍报错。
+
+Windows 录制画布为偶数尺寸，最短时长 1 毫秒，时间戳受系统 MP4 timescale
+量化。连续音频下分段补齐静止画面，保留 500 ms 在途视频余量；迟到视频的
+PTS 若落入已提交区间，录制报过载错误。完整 Windows 契约和当前测试范围
+见 [windows.md](windows.md)。

@@ -1,4 +1,5 @@
-__all__ = ["AdbScrPyException", "AdbScrPyInitException", "AdbScrPyH264DecoderException"]
+__all__ = ["AdbScrPyException", "AdbScrPyInitException", "AdbScrPyH264DecoderException",
+           "MediaPipelineOverloadedError"]
 
 
 class AdbScrPyException(Exception):
@@ -7,6 +8,10 @@ class AdbScrPyException(Exception):
     """
 
     pass
+
+
+class MediaPipelineOverloadedError(AdbScrPyException, RuntimeError):
+    """媒体队列超过数量、内存或等待时间预算，当前管线已失败。"""
 
 
 class AdbScrPyInitException(AdbScrPyException):

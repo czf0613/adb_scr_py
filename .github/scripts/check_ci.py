@@ -50,7 +50,12 @@ def check_archives(free_threaded: bool) -> None:
     sdist, = Path("dist").glob("*.tar.gz")
     tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     abi = tag + ("t" if free_threaded else "")
-    assert f"-{tag}-{abi}-macosx_" in wheel.name, wheel.name
+    if sys.platform == "win32":
+        platform = sysconfig.get_platform().replace("-", "_")
+        assert platform in {"win_amd64", "win_arm64"}, platform
+        assert f"-{tag}-{abi}-{platform}.whl" in wheel.name, wheel.name
+    else:
+        assert f"-{tag}-{abi}-macosx_" in wheel.name, wheel.name
 
     with zipfile.ZipFile(wheel) as archive:
         wheel_names = set(archive.namelist())
@@ -80,9 +85,10 @@ def check_archives(free_threaded: bool) -> None:
 
     native_files = {
         path.as_posix()
-        for directory in ("native_code/macOS/src", "native_code/macOS/include")
+        for directory in ("native_code/macOS/src", "native_code/macOS/include",
+                          "native_code/Windows/src", "native_code/Windows/include")
         for path in Path(directory).rglob("*")
-        if path.is_file() and path.suffix in {".c", ".m", ".h"}
+        if path.is_file() and path.suffix in {".c", ".m", ".h", ".cpp"}
     }
     assert native_files <= sdist_names, native_files - sdist_names
     forbidden = {"docs", "tests", "AGENTS.md", "CLAUDE.md", ".github", ".superpowers"}
@@ -91,10 +97,12 @@ def check_archives(free_threaded: bool) -> None:
     print(f"Verified package contents and ABI: {sdist.name}, {wheel.name}", flush=True)
 
 
-def check_imports() -> None:
+def check_imports(*, include_mcp: bool = True) -> None:
     # Import every shipped module from site-packages, never from src/.
     site_packages = Path(sysconfig.get_path("platlib")).resolve()
     for path in sorted(Path("src").glob("adb_scr*/**/*.py")):
+        if not include_mcp and path.parts[1] == "adb_scr_mcp":
+            continue
         parts = path.relative_to("src").with_suffix("").parts
         if parts[-1] == "__init__":
             parts = parts[:-1]
@@ -105,8 +113,11 @@ def check_imports() -> None:
     assert Path(_adb_scr_media.__file__).resolve().is_relative_to(site_packages)
     from importlib.resources import files
 
-    assert "get_agent_guide" in files("adb_scr_mcp").joinpath("agent_guide.md").read_text(encoding="utf-8")
-    print(f"Imported all modules and the native extension from {site_packages}", flush=True)
+    guide = (files("adb_scr_mcp").joinpath("agent_guide.md") if include_mcp
+             else site_packages / "adb_scr_mcp" / "agent_guide.md")
+    assert "get_agent_guide" in guide.read_text(encoding="utf-8")
+    scope = "all modules" if include_mcp else "core modules (MCP extra excluded)"
+    print(f"Imported {scope} and the native extension from {site_packages}", flush=True)
 
 
 def main() -> int:

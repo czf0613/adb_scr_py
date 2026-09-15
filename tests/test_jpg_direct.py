@@ -4,6 +4,7 @@ import asyncio
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -18,6 +19,8 @@ from adb_scr.media_ext.h264 import vtb_decoder
 
 @pytest.fixture(scope="module")
 def native_backend_probe(tmp_path_factory):
+    if sys.platform != "darwin":
+        pytest.skip("Apple JPEG backend probe requires macOS frameworks")
     root = Path(__file__).resolve().parents[1]
     binary = tmp_path_factory.mktemp("jpeg-backend") / "probe"
     subprocess.run(

@@ -79,6 +79,7 @@ def connect(url):
 
 
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.skipif(sys.platform == "win32", reason="Popen signal injection requires POSIX signals")
 def test_signal_and_repeated_signal_wait_for_async_cleanup(tmp_path, sig):
     with child(tmp_path) as (process, path, log, url):
         wait_until(lambda: ready(url), process, log)
@@ -103,6 +104,7 @@ def test_signal_and_repeated_signal_wait_for_async_cleanup(tmp_path, sig):
         assert "Task was destroyed" not in log.read_text()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Popen signal injection requires POSIX signals")
 def test_signal_during_startup_still_runs_lifespan_shutdown(tmp_path):
     with child(tmp_path, "startup") as (process, path, log, _):
         wait_until(lambda: "init-start" in events(path), process, log)
@@ -122,6 +124,7 @@ def test_signal_during_startup_still_runs_lifespan_shutdown(tmp_path):
         ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Popen signal injection requires POSIX signals")
 def test_signal_cancels_inflight_connect_then_cleans_up(tmp_path):
     with child(tmp_path, "connecting") as (process, path, log, url):
         wait_until(lambda: ready(url), process, log)

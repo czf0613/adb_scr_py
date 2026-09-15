@@ -8,11 +8,125 @@ Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖
 
 推送到 `master` 后的自动构建矩阵为 macOS 15/26 arm64 × Python 3.10–3.14、3.14t。
 CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14t 的实际 GIL 状态。
-云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。
+云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。另有 Windows x64/ARM64 的独立构建工作流，见 [Windows 文档](windows.md)。
 
 预编译发布 wheel 分为 `macosx_15_0_arm64`、`macosx_26_0_arm64` 两组，分别在
 macOS 15、26 构建并在各自系统上安装验证，均覆盖上述六种 Python ABI。
 发布流程见 [发布文档](releasing.md)。
+
+## 2026-09-16 Windows 提交前完整无设备回归
+
+普通 Python 3.14.7 原地重建后，运行完整无设备测试：
+
+```powershell
+uv run --python 3.14 --locked setup.py build_ext --inplace
+uv run --python 3.14 --locked pytest --ignore=tests/test_run.py -q -ra -o log_cli=false
+uv run --python 3.14 --locked pytest tests/test_run.py --collect-only -q
+```
+
+结果为 **207 passed, 79 skipped**；交互式真机脚本收集 1 项，不重复操作手机。
+跳过项包括 Apple 框架专用探针/录制素材、需要额外素材工具的旧测试、普通
+解释器下的 free-threading 检查，以及依赖 POSIX 子进程信号注入的测试。
+Windows 的系统媒体测试正常执行；MCP 的 Windows 控制台信号关闭行为仍未
+由这些 POSIX 测试验证。
+
+该轮发现 Windows 原生入口检查录制质量范围晚于读取解码句柄，已将有限值
+及 0–1 范围校验提前，与 macOS 的异常契约一致；七个非法质量用例纳入
+Windows CI。为 Apple 专用探针/素材及 POSIX 信号测试补齐平台限制。
+独立 3.10.21、3.14.7t 源树重建扩展和 wheel、重装后，手势/生命周期及非法
+录制质量检查各 **81 passed**；3.14t 的启动、导入和测试后 GIL 均关闭。
+这些改动没有改变原生并发边界或真机媒体路径。
+
+## 2026-09-16 Windows 旋转与控制补测
+
+后续按用户授权在 B 站执行进入/退出全屏及控制操作，完成四次横竖屏切换。
+从 1080×2400、2400×1080 分别开始录制，产生 205.384300 秒（6141 视频 /
+9627 AAC）和 179.145167 秒（5370 视频 / 8397 AAC）两段 MP4。全部视频
+和音频可由 Windows 系统解码，AAC 与源包逐包一致；固定画布尺寸、旋转后
+居中黑边通过原生 BGRA 回读及图像检查。控制行为及覆盖边界见
+[Windows 验证记录](windows.md#2026-09-16-真机旋转与控制补测)。
+
+本轮只修改 Python 手势计时：将随机等待下界从 `min` 改为 `max`，使
+短节点合法且长等待保留预期长度。没有改变原生并发代码。普通开发环境
+3.14.7 执行 `tests/test_action_series.py tests/test_lifecycle.py`，74 项通过。
+独立临时源树的 3.10.21、3.14.7t 重建原生扩展和 wheel、重装 wheel 后，
+从 site-packages 分别运行同一组定向测试，各 74 项通过。3.14t 在启动、
+导入、测试后均确认 GIL 关闭，未强制 GIL 状态，正常 `.venv` 仍为普通 3.14。
+Windows CI 新增 `test_action_series.py`；下方较早的检查计数不包含该文件。
+
+## 2026-09-16 Windows 真机修正后的兼容性回归
+
+修正 SinkWriter 阻塞限流、录制占用解码表面、静止画面下 AAC 积压后，
+重新在独立临时源树构建原生扩展、sdist/wheel，安装 wheel 后运行检查：
+
+| 解释器 / x64 | 已安装 wheel 的无设备检查 | GIL |
+| --- | --- | --- |
+| 3.10.21 | 96 passed, 2 skipped | 普通构建 |
+| 3.14.7 | 96 passed, 2 skipped | 普通构建 |
+| 3.14.7t | 97 passed, 1 skipped | 启动、导入、测试后均关闭 |
+
+52 个 Python 源码/存根的编译、包内容/ABI、模块导入检查通过；正常 `.venv`
+仍为普通 3.14，3.14t 没有强制 GIL 状态，仍只测试核心库。新增回归覆盖
+6.4 秒静止视频加连续 AAC、SinkWriter 内部积压容量/超时、无新输入时的
+错误通知，以及迟到视频显式报错；八帧录制过载后解码器仍可用。
+真机测试通过手动 `tests/windows_device_smoke.py` 执行，不纳入上述无设备计数。
+
+最终构建在 Windows 11 专业版 x64（10.0.26200）、Python 3.14.7、ADB 1.0.41、
+Android 14 手机上完成竖屏真机回归：
+
+- 分辨率 1080×2400，BGRA8 每帧恰好 10,368,000 字节，全部 alpha=255。
+- JPEG 原图及 `(1,3,101,99)` ROI、0.5 缩放回读尺寸正确（51×50）。
+- 60.202267 秒 MP4 的 1715 个视频样本全部经系统解码器回读；停止时钟预期
+  60.202246 秒，量化差约 21 微秒。
+- 2822 个 AAC 包与实际提交的源包逐包一致，全部解码为 PCM；音频起点
+  4.208 ms，尾部比视频多约 4.608 ms，处于完整 AAC 包的尾部处理范围。
+- 录制期间各 587 次 BGRA8/JPEG 读取：BGRA8 中位 15.982 ms、最大 47.055 ms；
+  JPEG quality=75 中位 23.638 ms、最大 49.362 ms。包括按需转换和分配，
+  不代表端到端延迟或其他机器的性能，也不用于判定硬件加速。
+- 取消错误等待不影响连接，重复 stop/disconnect、同一实例重连通过。
+  断开耗时 39.735 ms；断开自动收尾的另一段 MP4（2.130433 秒）也通过
+  视频全量解码和 100 包 AAC 一致性/解码检查。
+
+本地产物位于 `build/phone-test-final/`（不纳入 Git）；脚本未注入触摸操作。
+该轮按用户选择仅测当前竖屏；后来补做的真机旋转记录见上节。
+ARM64、Windows 10 仍未实机验证。
+
+## 2026-09-16 Windows 首版无设备验证
+
+Windows x64 上使用 MSVC 14.51 / Windows SDK 10.0.26100，通过 `setup.py`
+构建 Media Foundation/WIC 扩展。H.264/AAC 测试素材由 Windows 系统编码器
+生成，JPEG/MP4 用 WIC/SourceReader 回读，无 FFmpeg、无 ADB 或手机访问。
+
+独立临时源树分别完成原地编译、sdist、从 sdist 构建 wheel、安装 wheel 后
+执行 `.github/scripts/check_windows.py`，结果如下：
+
+| 解释器 / x64 | 已安装 wheel 的无设备检查 | GIL |
+| --- | --- | --- |
+| 3.10.21 | 92 passed, 2 skipped | 普通构建 |
+| 3.14.7 | 92 passed, 2 skipped | 普通构建 |
+| 3.14.7t | 93 passed, 1 skipped | 启动、导入、测试后均关闭 |
+
+普通版跳过 free-threading 导入检查，Windows 均跳过专用于 macOS 的 C
+绑定拦截 probe。3.14t 未设置 `PYTHON_GIL=0` 或 `-X gil=0`。
+所有归档包含 Windows/macOS 原生源码、scrcpy-server、类型及扩展，排除
+docs/tests/AGENTS.md；Python/存根语法检查及 `test_run.py` 仅收集通过。
+普通 3.10/3.14 导入全部核心及可选 MCP 模块；Windows 3.14t 仅验证核心库，
+因为可选 MCP 依赖的 pywin32 312 没有对应 cp314t wheel，不能安装该 extra。
+本地常规 `.venv` 仍为普通 3.14，`.python-version` 仍为 3.14。
+
+原生检查覆盖单帧与 P 帧解码、1080×2400/2400×1080/1440×3200、BGRA
+颜色/正负 stride/padding、JPEG 奇数 ROI、质量、静止录制时长、AAC 逐包
+一致性与首包偏移、间隙/重叠持久错误、确定性队列过载、旋转画布/黑边回读、
+系统内存处理路径、并发读取/关闭和无新包时的错误通知。
+
+本机补充测量使用 1080×2400 合成静止画面，预热 5 次、各读取 30 次：
+BGRA8 中位 10.733 ms、最大 11.842 ms，返回 10,368,000 字节；JPEG quality=75
+中位 18.009 ms、最大 20.166 ms，约 50 KB。测量包含按需转换、分配和复制，
+不含 ADB、持续解码和实际手机内容，不用于承诺其他机器吞吐或推断是否硬解。
+
+ARM64 的原生 CI 矩阵已添加，但本次未运行云端 workflow、未完成 ARM64
+实机验证；该首轮仅验证无设备路径。Windows 10 和更多 Windows 驱动组合仍需
+实机验证。首版实现契约、已知限制及复现步骤见 [windows.md](windows.md)。
 
 ## 2026-09-12 0.3.2 发布前验证
 

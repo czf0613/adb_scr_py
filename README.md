@@ -1,6 +1,6 @@
 # adb_scr_py
 
-通过 ADB 和 scrcpy 控制 Android 设备，并使用 macOS VideoToolbox 解码屏幕视频。Python 导入名为 `adb_scr`。
+通过 ADB 和 scrcpy 控制 Android 设备，并使用 macOS VideoToolbox 或 Windows Media Foundation 解码屏幕视频。Python 导入名为 `adb_scr`。
 
 支持 USB 和网络调试连接、点击/滑动/长按/粘贴、单指及多指手势、应用启动与停止、按需 JPEG 截图，以及 H.264/AAC MP4 屏幕录制。内部保留 BGRA8 原始帧通路，供 NumPy/OpenCV 消费；截图和录制都直接使用原生解码帧。
 
@@ -8,6 +8,8 @@
 
 - Python 3.10 或更高版本；本地开发使用普通 3.14。支持 free-threaded CPython，已验证 3.14t；需要对应 ABI 的构建，详见 [Python 兼容性](docs/python-compatibility.md)。
 - macOS，使用 VideoToolbox 硬件编解码和部分 Metal 特性，**推荐 Apple silicon**。不保证 Intel Mac 能正常使用；源码仍允许构建 x86_64，具体 wheel 可用性以发布文件为准。
+- Windows 首版面向近年的 Windows 10/11 x64、Windows on ARM64，使用系统 MF/WIC；不依赖 FFmpeg，不强制硬件加速。当前需源码构建，Windows 发布 wheel 尚未提供，见 [Windows 构建与限制](docs/windows.md)。
+- Windows 核心库已验证 3.14t；可选 MCP extra 当前受 pywin32 wheel 限制，仅使用普通 Python。
 - 已安装 ADB，设备已授权 USB 调试，或已具备 ADB 网络调试条件。
 
 ```bash
@@ -151,3 +153,11 @@ uv run --python 3.14 --locked --extra mcp adb-scr-mcp --port 8000
 ## 许可证与依赖
 
 MIT License。屏幕传输使用 [scrcpy](https://github.com/Genymobile/scrcpy)；媒体处理使用 Apple VideoToolbox、AVFoundation/CoreMedia、AudioToolbox、Accelerate/vImage、ImageIO/CoreGraphics 和 Core Image/Metal。
+
+## Windows 媒体错误
+
+Windows 队列容量或延迟超限时抛 `adb_scr.exceptions.MediaPipelineOverloadedError`。
+可在连接后并发等待 `device.wait_media_error()`，即使屏幕静止也能收到后台错误；
+正常断连返回 None，取消等待不影响会话。解码失败关闭会话，录制失败停止录制。
+`stop_recording()` 会再次报告录制错误。Windows 首版对超过一个 AAC 包的累计
+音频间隙/重叠明确报错，尚未实现 macOS 的 MP4 空编辑修复。

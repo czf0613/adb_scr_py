@@ -80,6 +80,29 @@ def test_complete_gesture_groups_preserve_order_and_coordinates(sequence, expect
     )
 
 
+@pytest.mark.parametrize("duration_ms", [1, 5, 10, 1000])
+def test_gesture_wait_accepts_short_durations_and_keeps_long_holds(monkeypatch, duration_ms):
+    from adb_scr.device import bin_utils
+
+    sleeps = []
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds * 1000)
+
+    # Exercise the real random_sleep_ms validation at its minimum random value.
+    monkeypatch.setattr(bin_utils.random, "randint", lambda lower, upper: lower)
+    monkeypatch.setattr(bin_utils.asyncio, "sleep", record_sleep)
+    actions = [
+        GestureActionNode(10, 10, GestureAction.DOWN, duration_ms),
+        GestureActionNode(10, 10, GestureAction.UP, 0),
+    ]
+    packets = run_actions(actions)
+    assert [packet[1] for packet in packets] == [0, 1]
+    assert len(sleeps) == 1
+    assert 0 < sleeps[0] <= duration_ms + 10
+    assert abs(sleeps[0] - duration_ms) <= 10
+
+
 @pytest.mark.parametrize(
     "sequence",
     [

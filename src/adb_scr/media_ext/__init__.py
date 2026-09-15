@@ -24,6 +24,10 @@ def create_h264_decoder(sps_and_pps: bytes) -> H264DecoderBase | None:
             except AdbScrPyH264DecoderException:
                 logger.error("创建VtbH264Decoder失败")
                 return None
+        case "win32":
+            from .h264.mf_decoder import MfH264Decoder
+
+            return MfH264Decoder(sps_and_pps)
         case _:
             logger.error(f"当前平台{sys.platform}，未实现H264解码器")
             return None

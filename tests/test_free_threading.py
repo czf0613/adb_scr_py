@@ -84,6 +84,7 @@ runpy.run_path(str(root / "setup.py"), run_name="__main__")
     return directory
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS binding interception probe")
 def test_bgra_encoder_detaches_thread_state(thread_state_probe):
     run_python(
         """

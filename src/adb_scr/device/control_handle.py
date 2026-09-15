@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, final
 from ..async_utils import close_writer, complete_on_cancel
 from ..logger import logger
 from ..media_ext import H264DecoderBase, create_h264_decoder
+from ..media_ext import _adb_scr_media as _media
 from .bin_utils import (
     decode_frame_header,
     decode_lossy_utf8,
@@ -54,6 +55,9 @@ class DeviceControlHandle:
         self._ready = asyncio.Event()
         self._closed = asyncio.Event()
         self._stopped = asyncio.Event()
+        self._media_done = asyncio.Event()
+        self.media_error: Exception | None = None
+        self.decoder_error: Exception | None = None
         self._close_task: asyncio.Task | None = None
         self.serial = serial
         self.uds_name = f"localabstract:scrcpy_{scid}"
@@ -118,6 +122,8 @@ class DeviceControlHandle:
                 asyncio.create_task(self.process_video_upstream()),
                 asyncio.create_task(self.process_control_upstream()),
             ]
+            if hasattr(_media, "check_decoder_error"):
+                self.async_tasks.append(asyncio.create_task(self.process_media_errors()))
             if self.audio_stream is not None:
                 self.async_tasks.append(asyncio.create_task(self.process_audio_upstream()))
             await asyncio.wait_for(self._ready.wait(), self.options.io_timeout)
@@ -200,6 +206,7 @@ class DeviceControlHandle:
             raise
         except Exception as error:
             reason = f"视频接收失败：{error!r}"
+            self._fail_media(error, decoder=True)
         finally:
             self._stop(reason)
             self._ready.set()
@@ -213,6 +220,7 @@ class DeviceControlHandle:
             raise
         except Exception as error:
             self.recording.fail(error)
+            self._fail_media(error)
             self._stop(f"音频接收失败：{error!r}")
 
     async def process_control_upstream(self) -> None:
@@ -229,10 +237,37 @@ class DeviceControlHandle:
         finally:
             self._stop(reason)
 
+    def _fail_media(self, error: Exception, *, decoder: bool = False) -> None:
+        if self.media_error is None:
+            self.media_error = error
+        if decoder and self.decoder_error is None:
+            self.decoder_error = error
+        self._media_done.set()
+
+    async def wait_media_error(self) -> None:
+        await self._media_done.wait()
+        if self.media_error is not None:
+            raise self.media_error
+
+    async def process_media_errors(self) -> None:
+        """Observe native failure even when the phone sends no further packets."""
+        while self.running:
+            check_decoder = getattr(self.h264_decoder, "check_error", None)
+            if check_decoder is not None:
+                try:
+                    await check_decoder()
+                except Exception as error:
+                    self._fail_media(error, decoder=True)
+                    self._stop(f"原生解码失败：{error!r}")
+                    return
+            await self.recording.check_error()
+            await asyncio.sleep(0.1)
+
     def _stop(self, reason: str) -> None:
         self.recording.freeze_end()
         self.running = False
         self._stopped.set()
+        self._media_done.set()
         if self._close_task is None:
             self.disconnect_reason = reason
             self._close_task = asyncio.create_task(self._cleanup())
@@ -289,6 +324,8 @@ class DeviceControlHandle:
         Returns:
             如果获取成功，则返回一个元组，包含帧的宽度、高度和像素数据；否则返回None
         """
+        if self.decoder_error is not None:
+            raise self.decoder_error
         if not self.running:
             logger.warning("设备未连接，无法获取视频帧")
             return None
@@ -307,6 +344,8 @@ class DeviceControlHandle:
         roi: tuple[int, int, int, int] | None = None,
     ) -> bytes | None:
         """按需直接编码最新原生帧，取消时等待编码完成后释放解码器锁。"""
+        if self.decoder_error is not None:
+            raise self.decoder_error
         if not self.running:
             return None
         async with self._mutex:

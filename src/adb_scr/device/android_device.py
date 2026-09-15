@@ -73,6 +73,7 @@ class AndroidDevice:
         self.scrcpy_server_process = None
         self._mutex = Lock()
         self._last_recording = None
+        self._last_media_handle: DeviceControlHandle | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -121,6 +122,7 @@ class AndroidDevice:
             if self.is_connected:
                 return True
             await complete_on_cancel(self._disconnect_locked("清理旧会话"))
+            self._last_media_handle = None
             self._disconnected = _DisconnectEvent()
             self.last_disconnect_reason = None
             try:
@@ -165,6 +167,7 @@ class AndroidDevice:
         self.control_handle = DeviceControlHandle(
             self.serial, self.scid, options=self.options, audio_enabled=android_api_level >= 30
         )
+        self._last_media_handle = self.control_handle
         if not await self.control_handle.connect_sockets():
             raise ConnectionError(self.control_handle.disconnect_reason)
 
@@ -255,7 +258,7 @@ class AndroidDevice:
 
         Notes:
             重复调用安全。流和子进程关闭异常会记录日志；原生销毁必须等待
-            VideoToolbox/GCD 工作完成，不能用硬超时强制释放在用内存。
+            原生媒体工作完成，不能用硬超时强制释放在用内存。
         """
         if self.control_handle is not None and self.control_handle.running:
             self.control_handle._stop("主动断开")
@@ -279,6 +282,10 @@ class AndroidDevice:
         Notes:
             音频不可用时记录警告并生成纯视频文件。首帧使用当前画面，
             无需等待下一帧或手机关键帧。音频按 AAC 包边界裁剪。
+            Windows 首帧提交到 SinkWriter，最短时长 1 毫秒；超过一包的
+            累计 AAC 间隙/重叠报错。后台错误可用 wait_media_error() 等待。
+            连续音频下分段补齐静止画面，保留 500 ms 在途视频余量；
+            视频晚于已提交区间时录制失败。
             quality 不是固定码率或体积比例，1.0 不保证 H.264 无损。
         """
         handle = self.control_handle
@@ -296,6 +303,16 @@ class AndroidDevice:
         """
         if self._last_recording is not None:
             await self._last_recording.stop()
+
+    async def wait_media_error(self) -> None:
+        """等待当前会话的媒体错误并抛出原始异常；正常停止返回 None。
+
+        Windows 后台原生错误由独立监控检查，无需等下一包或下一次截图。
+        未连接时返回；取消此等待不关闭会话。等待者绑定调用时的会话。
+        """
+        handle = self.control_handle or self._last_media_handle
+        if handle is not None:
+            await handle.wait_media_error()
 
     async def launch_app(self, package_name: str, activity_name: str) -> bool:
         """启动设备上的应用
@@ -359,6 +376,7 @@ class AndroidDevice:
             TypeError: 参数类型不符合约定（bool 不作为数值接受）。
             ValueError: 质量、比例、ROI 或缩放后尺寸超出有效范围。
             OverflowError: 整数参数超出原生数值类型范围。
+            RuntimeError: Windows 原生转换失败或会话已记录解码错误。
 
         Notes:
             先裁剪再缩放。输出宽高分别按 floor(裁剪尺寸 * scale + 0.5)
@@ -368,6 +386,8 @@ class AndroidDevice:
             多次调用可能返回同一帧，取消会等待原生工作结束。
         """
         if self.control_handle is None:
+            if self._last_media_handle is not None and self._last_media_handle.decoder_error is not None:
+                raise self._last_media_handle.decoder_error
             return None
         return await self.control_handle.get_current_frame_jpg(quality, scale, roi)
 
@@ -540,7 +560,9 @@ class AndroidDevice:
             check=True 时，每个 ID 必须先 DOWN，按下后才允许 MOVE 或 UP；
             已按下的 ID 不能重复 DOWN，UP 后可以再次 DOWN。不同 ID 的动作
             可以交错，结束时必须全部抬起，支持连续多组手势。
-            持续时间范围为 0 到 10000 毫秒；等待含随机扰动，不是精确的计时接口。
+            持续时间范围为 0 到 10000 毫秒；0 不等待，正值的等待目标为
+            max(1, duration_ms - 10) 到 duration_ms + 10 毫秒之间的随机整数。
+            实际耗时还受调度影响，不是精确的计时接口。
             发送前完整检查列表，失败时记录日志并返回，不发送任何节点。
             返回值不表示动作执行确认；断连或取消仍可能中断已开始的手势。
         """
@@ -616,7 +638,7 @@ class AndroidDevice:
                     # 添加一点扰动避免检测
                     if not await self._gesture_wait(
                         random_sleep_ms(
-                            min(1, node.duration_ms - 10), node.duration_ms + 10
+                            max(1, node.duration_ms - 10), node.duration_ms + 10
                         )
                     ):
                         return
