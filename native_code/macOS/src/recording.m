@@ -11,6 +11,9 @@
 #include <math.h>
 #include <errno.h>
 
+// Include running work; absorb startup and short scheduling stalls.
+static const unsigned recording_video_capacity = 8;
+
 typedef struct {
   int64_t start;
   int64_t duration;
@@ -566,7 +569,7 @@ void recording_submit_frame(void *context, CVPixelBufferRef frame, int64_t pts) 
   CVPixelBufferRelease(r->latest);
   r->latest = CVPixelBufferRetain(frame);
   r->latest_pts = pts;
-  if (r->pending_video >= 2 || r->error[0] != '\0') {
+  if (r->pending_video >= recording_video_capacity || r->error[0] != '\0') {
     pthread_mutex_unlock(&r->ingress);
     return;
   }

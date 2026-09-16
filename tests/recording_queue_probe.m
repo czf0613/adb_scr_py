@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i <= 10000; i++) {
       recording_submit_frame(r, frame, i);
     }
-    assert(r->pending_video == 2);
+    assert(r->pending_video == 8);
     assert(r->latest_pts == 10000);
     NSData *packet = [NSData dataWithContentsOfFile:@(argv[2])];
     for (int i = 0; i < 256; i++) {
