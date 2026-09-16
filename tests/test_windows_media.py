@@ -106,7 +106,8 @@ def test_phone_dimensions(probe, w, h):
         assert len(frame_ready(media, handle)[2]) == w * h * 4
 
 
-def test_static_recording_has_full_duration_and_exclusive_path(probe, clip, tmp_path):
+@pytest.mark.parametrize("attempt", range(12))
+def test_static_recording_has_full_duration_and_exclusive_path(probe, clip, tmp_path, attempt):
     from adb_scr.media_ext import _adb_scr_media as media
     path = tmp_path / "静止画面.mp4"
     with decoder(media, clip) as (_, _, handle):

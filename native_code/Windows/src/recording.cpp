@@ -382,9 +382,18 @@ void Recorder::stop(int64_t end_pts) {
             queue.fail(std::current_exception());
         }
         if (writer) {
+            MF_SINK_WRITER_STATISTICS stats{};
+            stats.cb = sizeof(stats);
+            HRESULT stats_hr = writer->GetStatistics(video_stream, &stats);
             HRESULT hr = writer->Finalize();
             if (FAILED(hr)) {
-                try { check(hr, "finalize MP4"); } catch (...) { queue.fail(std::current_exception()); }
+                std::string operation = "finalize MP4";
+                if (SUCCEEDED(stats_hr)) {
+                    operation += " (video received=" + std::to_string(stats.qwNumSamplesReceived) +
+                        ", encoded=" + std::to_string(stats.qwNumSamplesEncoded) +
+                        ", processed=" + std::to_string(stats.qwNumSamplesProcessed) + ")";
+                }
+                try { check(hr, operation.c_str()); } catch (...) { queue.fail(std::current_exception()); }
             }
         }
         pending.reset();

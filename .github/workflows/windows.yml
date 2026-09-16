@@ -20,11 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: windows-2025, python: "3.10", arch: x64}
-          - {os: windows-2025, python: "3.14", arch: x64}
-          - {os: windows-2025, python: "3.14t", arch: x64}
-          - {os: windows-11-arm, python: "3.14", arch: arm64}
-          - {os: windows-11-arm, python: "3.14t", arch: arm64}
+          - {os: windows-2025, python: "3.10", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.14", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.14t", arch: x64, mcp: false}
+          - {os: windows-11-arm, python: "3.14", arch: arm64, mcp: false}
+          - {os: windows-11-arm, python: "3.14t", arch: arm64, mcp: false}
     defaults:
       run:
         shell: pwsh
@@ -35,16 +35,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Select native Python architecture and ABI
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: "0.12.13"
-          python-version: ${{ matrix.python == '3.14' && '3.14+gil' || matrix.python }}
           enable-cache: true
           cache-dependency-glob: uv.lock
           cache-suffix: windows-${{ matrix.arch }}-${{ matrix.python }}
       - name: Install locked dependencies
-        # Optional MCP depends on pywin32, which currently has no cp314t wheel.
-        run: uv sync --locked ${{ matrix.python != '3.14t' && '--extra mcp' || '' }} --no-install-project
+        # MCP's locked native dependencies lack wheels for ARM64 / free threading.
+        # Bind uv to the selected executable so ARM64 cannot fall back to x64 emulation.
+        run: uv sync --python "${{ steps.python.outputs.python-path }}" --locked ${{ matrix.mcp && '--extra mcp' || '' }} --no-install-project
       - name: Check interpreter architecture
         run: |
           uv run --no-sync python -c "import sysconfig; assert sysconfig.get_platform() == '${{ matrix.arch == 'arm64' && 'win-arm64' || 'win-amd64' }}', sysconfig.get_platform()"
@@ -61,7 +67,7 @@ jobs:
           $wheel = (Get-ChildItem dist/*.whl).FullName
           uv pip install --python .venv/Scripts/python.exe --no-deps $wheel
       - name: Validate installed package and system media without a phone
-        run: uv run --no-sync python -Werror::RuntimeWarning .github/scripts/check_windows.py "${{ matrix.python }}" ${{ matrix.python == '3.14t' && '--core-only' || '' }}
+        run: uv run --no-sync python -Werror::RuntimeWarning .github/scripts/check_windows.py "${{ matrix.python }}" ${{ !matrix.mcp && '--core-only' || '' }}
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
