@@ -46,8 +46,6 @@ pywin32 312 没有 cp314t wheel；锁定的 cryptography 在 ARM64 上会转入�
 3.14/3.14t。通过 `actions/setup-python` 显式选择架构和 ABI，并将解释器
 绝对路径传给 `uv sync --python`，避免 ARM64 上的版本选择回落到 x64 仿真。
 随后核对实际 `sysconfig.get_platform()`，使用原生 `windows-11-arm` 验证。
-现有正式发布工作流仍为 macOS；Windows 暂提供源码构建
-和独立 CI 产物，尚未发布 Windows wheel。
 
 本机已完成 Windows 11 x64 / Android 14 竖屏真机测试：最终构建录制约
 60.2 秒，1715 个视频样本全部解码，2822 个 AAC 包直通一致且可解码；

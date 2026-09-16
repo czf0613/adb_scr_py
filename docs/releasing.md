@@ -24,7 +24,7 @@ arm64。发布的 wheel 标签为：
 每种 ABI 分别发布 `macosx_15_0_arm64`、`macosx_26_0_arm64` 两个平台的 wheel，
 共 12 个。macOS 15 构建面向 15 及更新系统，macOS 26 构建面向 26 及更新系统。
 两个系统均安装并验证自己构建的 wheel，不再运行跨 macOS 版本的安装测试。
-不生成 x86_64、universal2、Linux 或 Windows wheel，也不承诺较老 macOS 的源码
+该 macOS 工作流不生成 x86_64 或 universal2 wheel，也不承诺较老 macOS 的源码
 构建兼容性。平台标签含义见 [Python 打包规范](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/#macos)。
 
 各任务安装 `mcp` extra，复用 `check_ci.py` 验证已安装 wheel、归档内容、ABI、
@@ -68,7 +68,7 @@ gh workflow run release.yml --ref master
 
 正式发布时，先更新 `pyproject.toml` 的版本，并执行 `uv lock` 更新锁文件；提交
 推送后，在对应提交上发布 GitHub Release，标签必须等于 `v` 加包版本，例如包版本
-`0.3.1` 对应标签 `v0.3.1`。仅 push 标签或保存 Release 草稿不会触发发布。
+`0.4.0` 对应标签 `v0.4.0`。仅 push 标签或保存 Release 草稿不会触发发布。
 GitHub Release 的 `published` 事件触发全部构建测试，通过后自动上传 PyPI。
 
 只有已验证的那批文件会上传；不会在发布 job 再次构建。未开启跳过已存在文件，

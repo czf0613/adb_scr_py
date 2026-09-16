@@ -1,5 +1,11 @@
 # Screen Recording Implementation Plan
 
+> Historical implementation plan for the initial macOS recorder. Signatures and
+> execution instructions below describe that completed task. For the current
+> `quality=0.75` API, Windows backend, and macOS eight-frame recording capacity,
+> see [API documentation](../../api.md#屏幕录制) and
+> [architecture](../../architecture.md#录制时间与资源边界).
+
 > **For agentic workers:** Use superpowers:subagent-driven-development. Native implementation is delegated; the controller implements the independent Python integration and performs final integration verification. No commits. Device testing begins only after the user connects a phone and authorizes that phase.
 
 **Goal:** Add asynchronous start/stop MP4 recording with hardware H.264 and passthrough AAC.

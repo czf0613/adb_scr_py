@@ -6,7 +6,8 @@
 
 ## 安装与启动
 
-在仓库根目录执行：
+macOS 和 Windows 均可运行 MCP 服务。在仓库根目录执行以下命令；同样适用于
+Windows PowerShell：
 
 ```bash
 uv sync --python 3.14 --locked --extra mcp
@@ -20,8 +21,26 @@ uv run --python 3.14 --locked --extra mcp adb-scr-mcp
 uv run --python 3.14 --locked --extra mcp python -m adb_scr_mcp --port 8000
 ```
 
-服务要求 macOS、已安装的 ADB 和对应 Python ABI 的原生扩展，与基础库相同。
+服务要求已安装的 ADB 和对应平台、Python ABI 的原生扩展，与基础库相同。
 Python 最低支持 3.10；服务依赖是可选的 `mcp` extra，普通 `adb_scr` 使用者无需安装。
+
+macOS 使用 VideoToolbox/Metal，推荐 Apple silicon。Windows 使用系统
+Media Foundation/WIC；如需从源码构建，安装 Visual Studio C++ 桌面工具和
+Windows SDK，详细步骤见 [Windows 文档](windows.md)。Windows MCP 的当前验证
+范围为 x64 普通 Python。Windows ARM64 和 3.14t 已验证核心媒体库，但可选
+MCP 依赖仍有 wheel/构建限制，不能将核心库验证等同于 MCP 支持验证。
+
+两平台采用不同的过载策略。Windows 硬件、驱动及实际编解码性能差异较大，
+不强制硬件加速；队列容量或积压时间超限时，明确报
+`MediaPipelineOverloadedError`，性能不足时停止相应管线，不靠丢帧继续运行。
+解码失败关闭设备会话，录制失败只停止该录制；`stop_recording` 会报告录制错误。
+底层 Python API 可通过 `wait_media_error()` 等待错误，MCP 未单独暴露该等待工具。
+
+macOS 要求 VideoToolbox 硬件 H.264 编解码，设计上预期硬件加速能够满足常规
+屏幕流负载。录制视频允许最多 8 帧未完成任务，以吸收冷启动和短时性能波动；
+满时跳过新帧的编码提交，仍保存最新画面用于补尾帧。这不构成绝不过载的保证：
+音频队列超限、编码失败或文件写入背压超时仍会报告录制错误。macOS 解码输入
+目前没有 Windows 同等的显式积压限额与过载检测，不能把硬件加速视为该检测的替代。
 
 参数：
 
@@ -169,7 +188,8 @@ H.264 无损。实际效果随画面和硬件变化，AAC 音频保持直通。M
 或监听端口已被占用时也执行 lifespan 清理。嵌入时取消 `serve()` 协程，同样等待
 清理后再传播 `CancelledError`。退出后恢复此前安装的信号处理器。
 
-HTTP drain 超时不是整个退出流程的硬截止时间。原生 VideoToolbox/GCD 工作和
+HTTP drain 超时不是整个退出流程的硬截止时间。原生媒体工作（macOS 的
+VideoToolbox/GCD、Windows 的 Media Foundation 工作线程）和
 MP4 收尾必须完成才能释放资源，实际退出可能超过该时长。SIGKILL 或强制终止
 进程无法执行 Python 清理。单台设备抛出清理异常时仍尝试清理其余设备并反初始化，
 记录错误并以失败状态退出。
