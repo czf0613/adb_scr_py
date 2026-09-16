@@ -3,6 +3,7 @@
 import ctypes
 import gc
 import importlib.util
+import re
 import subprocess
 import sys
 import time
@@ -255,6 +256,55 @@ def test_decoder_overload_fails_and_stays_failed_after_close(probe, clip):
         probe.check_decoder_error(handle)
 
 
+def test_delayed_decoder_output_without_another_input(probe, clip):
+    _, _, handle = probe.create_decoder(clip[0])
+    try:
+        # A completed input job may not have produced output yet. No more packets
+        # arrive on a static screen; the worker must continue retrieving output.
+        probe.test_delay_decoder_output(handle, 20)
+        assert probe.enqueue_frame(handle, clip[1][0], 0)
+        frame = frame_ready(probe, handle)
+        assert len(frame[2]) == 130 * 98 * 4
+        assert pixel(frame, 10, 10)[2] > 220
+    finally:
+        probe.destroy_decoder(handle)
+
+
+def test_decoder_budget_includes_input_already_accepted_by_mft(probe, clip):
+    from adb_scr.exceptions import MediaPipelineOverloadedError
+    _, _, handle = probe.create_decoder(clip[0])
+    probe.test_delay_decoder_output(handle, 0xFFFFFFFF)
+    probe.enqueue_frame(handle, clip[1][0], 0)
+    probe.set_decoder_recording(handle, None)  # Input job has completed.
+    with blocked_queue(probe, handle):
+        for i in range(31):
+            probe.enqueue_frame(handle, clip[1][0], (i + 1) * 33333)
+        with pytest.raises(MediaPipelineOverloadedError, match="decode input backlog"):
+            probe.enqueue_frame(handle, clip[1][0], 32 * 33333)
+    with pytest.raises(MediaPipelineOverloadedError):
+        probe.check_decoder_error(handle)
+
+
+def test_stalled_decoder_output_expires_without_new_input(probe, clip):
+    from adb_scr.exceptions import MediaPipelineOverloadedError
+    _, _, handle = probe.create_decoder(clip[0])
+    try:
+        probe.test_delay_decoder_output(handle, 0xFFFFFFFF)
+        probe.enqueue_frame(handle, clip[1][0], 0)
+        probe.test_delay_decoder_output(handle, 0xFFFFFFFF, True)
+        deadline = time.monotonic() + 2
+        with pytest.raises(MediaPipelineOverloadedError, match="decode output exceeded 5000 ms"):
+            while time.monotonic() < deadline:
+                probe.check_decoder_error(handle)
+                time.sleep(0.01)
+        with pytest.raises(MediaPipelineOverloadedError):
+            probe.get_current_frame_bgra8(handle)
+    finally:
+        probe.destroy_decoder(handle)
+    with pytest.raises(MediaPipelineOverloadedError):
+        probe.check_decoder_error(handle)
+
+
 def test_recording_video_overload_does_not_kill_decoder(probe, clip, tmp_path):
     from adb_scr.exceptions import MediaPipelineOverloadedError
     with decoder(probe, clip) as (_, _, handle):
@@ -332,8 +382,11 @@ def test_predictive_frames_and_rotation_recording(probe, tmp_path):
     packets = probe.test_read_mp4(str(path))
     assert len(packets) >= 9
     assert all(a[0] < b[0] for a, b in zip(packets, packets[1:]))
-    # SourceReader exposes Annex B SPS/PPS on the first packet.
-    with decoder(probe, (packets[0][2], [packets[0][2]])) as (w, h, readback):
+    # Extract SPS/PPS only: using the whole packet as config would prepend a
+    # second copy of its IDR, submitting two pictures as one input sample.
+    config = b"".join(b"\0\0\0\1" + nal for nal in re.split(b"\0\0\0?\1", packets[0][2])
+                      if nal and nal[0] & 31 in (7, 8))
+    with decoder(probe, (config, [packets[0][2]])) as (w, h, readback):
         assert (w, h) == (130, 98)
         for pts, _, packet in packets[1:]:
             probe.enqueue_frame(readback, packet, pts // 10)
@@ -363,6 +416,12 @@ def test_system_memory_media_without_d3d_manager(probe, clip, tmp_path):
         cpu.set_decoder_recording(handle, None)
         cpu.stop_recording(recorder, 1_000_000)
     assert probe.test_read_mp4(str(tmp_path / "cpu.mp4"))
+    # Exercise software MFT scheduling even when this runner has a usable GPU.
+    def read_first_frame(_):
+        with decoder(cpu, clip) as (_, _, handle):
+            return cpu.get_current_frame_jpg(handle)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(jpg.startswith(b"\xff\xd8") for jpg in pool.map(read_first_frame, range(48)))
 
 
 def test_close_races_with_shared_handle_readers(probe, clip):

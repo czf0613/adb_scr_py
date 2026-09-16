@@ -67,6 +67,7 @@ class Queue {
     size_t max_jobs, max_bytes;
     std::string name;
     std::shared_ptr<Runtime> runtime;
+    std::function<void()> idle;
     void loop(std::promise<void> ready);
     void expire_locked();
 public:
@@ -77,6 +78,8 @@ public:
     void check_error();
     void fail(std::exception_ptr value);
     void close();
+    // Only the owning worker may install/clear its idle poll callback.
+    void set_idle(std::function<void()> run) { idle = std::move(run); }
     std::shared_ptr<Runtime> lease() const { return runtime; }
 };
 
@@ -113,6 +116,7 @@ Bytes jpeg(uint32_t w, uint32_t h, const uint8_t* pixels, const ImageOptions& op
 
 class Recorder;
 class Decoder {
+    struct Input { size_t bytes; Clock::time_point accepted; };
     Queue queue{"decode", 32, 64 * 1024 * 1024};
     ComPtr<IMFTransform> transform;
     ComPtr<IMFMediaType> output_type;
@@ -121,6 +125,9 @@ class Decoder {
     FramePtr latest;
     std::shared_ptr<Recorder> recorder;
     Bytes configuration;
+    std::mutex inputs_mutex;
+    size_t pending_inputs = 0, pending_bytes = 0;
+    std::deque<Input> submitted;
     bool closed = false;
     void negotiate();
     void receive();
@@ -134,6 +141,9 @@ public:
     void check_error();
     void close();
 #ifdef ADB_SCR_TESTING
+    unsigned delayed_output_polls = 0;
+    bool stalled_output = false;
+    void delay_output(unsigned polls, bool expired);
     void block(HANDLE entered, HANDLE release);
 #endif
 };

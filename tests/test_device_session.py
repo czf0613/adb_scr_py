@@ -52,9 +52,10 @@ def install_device_fakes(monkeypatch, *, fail_control=False, process_exit=False)
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-c",
-            "import time; time.sleep(0.15)"
+            "import sys; sys.stdin.buffer.read(1)"
             if process_exit
             else "import time; time.sleep(30)",
+            stdin=asyncio.subprocess.PIPE if process_exit else None,
         )
         processes.append(process)
         return process
@@ -104,7 +105,11 @@ def test_process_exit_notifies_and_same_device_reconnects(monkeypatch):
         try:
             assert await device.connect()
             assert device.is_connected
+            # Exit after startup has completed, regardless of runner speed.
+            processes[0].stdin.write(b"x")
+            await processes[0].stdin.drain()
             assert await asyncio.wait_for(device.wait_disconnected(), 2)
+            assert processes[0].returncode == 0
             assert not device.is_connected
             assert device.control_handle is None
             assert await device.connect()

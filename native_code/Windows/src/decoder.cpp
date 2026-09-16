@@ -258,9 +258,19 @@ void Decoder::negotiate() {
 void Decoder::receive() {
     while (true) {
         queue.check_error();
+        if (!submitted.empty() && Clock::now() - submitted.front().accepted > std::chrono::seconds(5)) {
+            throw Failure("decode output exceeded 5000 ms latency budget", true);
+        }
+#ifdef ADB_SCR_TESTING
+        if (stalled_output || delayed_output_polls) {
+            if (delayed_output_polls) { --delayed_output_polls; }
+            return;
+        }
+#endif
         HRESULT status;
         auto sample = output_sample(transform.Get(), status);
         if (status == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+            if (submitted.empty()) { queue.set_idle({}); }
             return;
         }
         if (status == MF_E_TRANSFORM_STREAM_CHANGE) {
@@ -271,6 +281,15 @@ void Decoder::receive() {
         if (!sample) {
             continue;
         }
+        if (submitted.empty()) {
+            throw Failure("H.264 decoder produced output without a pending picture");
+        }
+        {
+            std::lock_guard<std::mutex> lock(inputs_mutex);
+            --pending_inputs;
+            pending_bytes -= submitted.front().bytes;
+        }
+        submitted.pop_front();
         auto frame = std::make_shared<Frame>();
         frame->runtime = queue.lease();
         frame->sample = sample;
@@ -302,25 +321,47 @@ bool Decoder::enqueue(const uint8_t* data, size_t size, int64_t pts) {
     if (size <= 4 || size > 64 * 1024 * 1024 || pts < 0 || pts > INT64_MAX / 10) {
         throw Failure("invalid H.264 packet size or timestamp");
     }
-    // Queue ingress is serialized by the Capsule lock. Own bytes before returning.
-    auto bytes = std::make_shared<Bytes>(data, data + size);
-    queue.post([this, bytes, pts] {
-        if (!configuration.empty()) {
-            bytes->insert(bytes->begin(), configuration.begin(), configuration.end());
-            configuration.clear();
+    {
+        std::lock_guard<std::mutex> lock(inputs_mutex);
+        if (pending_inputs >= 32 || size > 64 * 1024 * 1024 - pending_bytes) {
+            auto error = std::make_exception_ptr(Failure("decode input backlog exceeded 32 pictures / 64 MiB", true));
+            queue.fail(error);
+            std::rethrow_exception(error);
         }
-        auto sample = make_sample(bytes->data(), bytes->size(), pts, 1);
-        auto lengths = nalu_lengths(*bytes);
-        check(sample->SetBlob(MF_NALU_LENGTH_INFORMATION, reinterpret_cast<const UINT8*>(lengths.data()),
-            static_cast<UINT32>(lengths.size() * sizeof(DWORD))), "NAL lengths");
-        HRESULT hr = transform->ProcessInput(0, sample.Get(), 0);
-        if (hr == MF_E_NOTACCEPTING) {
+        ++pending_inputs;
+        pending_bytes += size;
+    }
+    // Reserve the budget until output, including pictures retained inside the MFT.
+    auto accepted = Clock::now();
+    try {
+        auto bytes = std::make_shared<Bytes>(data, data + size);
+        queue.post([this, bytes, pts, size, accepted] {
+            if (!configuration.empty()) {
+                bytes->insert(bytes->begin(), configuration.begin(), configuration.end());
+                configuration.clear();
+            }
+            auto sample = make_sample(bytes->data(), bytes->size(), pts, 1);
+            auto lengths = nalu_lengths(*bytes);
+            check(sample->SetBlob(MF_NALU_LENGTH_INFORMATION, reinterpret_cast<const UINT8*>(lengths.data()),
+                static_cast<UINT32>(lengths.size() * sizeof(DWORD))), "NAL lengths");
+            HRESULT hr = transform->ProcessInput(0, sample.Get(), 0);
+            if (hr == MF_E_NOTACCEPTING) {
+                receive();
+                hr = transform->ProcessInput(0, sample.Get(), 0);
+            }
+            check(hr, "submit H.264 frame");
+            submitted.push_back({size, accepted});
+            // Some software decoder calls return NEED_MORE_INPUT before output is ready.
+            // Keep accepting input; poll on this same MTA only while pictures are pending.
+            queue.set_idle([this] { receive(); });
             receive();
-            hr = transform->ProcessInput(0, sample.Get(), 0);
-        }
-        check(hr, "submit H.264 frame");
-        receive();
-    }, size);
+        }, size);
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(inputs_mutex);
+        --pending_inputs;
+        pending_bytes -= size;
+        throw;
+    }
     return true;
 }
 FramePtr Decoder::snapshot() {
@@ -338,6 +379,8 @@ void Decoder::close() {
     }
     closed = true;
     queue.call([this] {
+        queue.set_idle({});
+        submitted.clear();
         recorder.reset();
         if (transform) {
             transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -354,6 +397,15 @@ void Decoder::close() {
     queue.close();
 }
 #ifdef ADB_SCR_TESTING
+void Decoder::delay_output(unsigned polls, bool expired) {
+    queue.call([this, polls, expired] {
+        delayed_output_polls = polls;
+        stalled_output = polls == UINT_MAX;
+        if (expired && !submitted.empty()) {
+            submitted.front().accepted -= std::chrono::seconds(6);
+        }
+    });
+}
 void Decoder::block(HANDLE entered, HANDLE release) {
     queue.post([entered, release] { SetEvent(entered); WaitForSingleObject(release, 10000); });
 }

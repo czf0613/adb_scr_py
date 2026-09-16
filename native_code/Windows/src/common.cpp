@@ -104,15 +104,30 @@ void Queue::loop(std::promise<void> ready) {
         while (true) {
             std::shared_ptr<Job> job;
             std::exception_ptr failure;
+            bool polling = false;
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                wake.wait(lock, [&] { return closing || !jobs.empty(); });
-                if (jobs.empty()) {
+                auto available = [&] { return closing || !jobs.empty(); };
+                if (idle) {
+                    if (!wake.wait_for(lock, std::chrono::milliseconds(1), available)) {
+                        job = std::make_shared<Job>();
+                        job->run = idle;
+                        job->bytes = 0;
+                        job->cleanup = false;
+                        job->accepted = Clock::now();
+                        polling = true;
+                    }
+                } else {
+                    wake.wait(lock, available);
+                }
+                if (!polling && jobs.empty()) {
                     break;
                 }
                 expire_locked();
-                job = jobs.front();
-                jobs.pop_front();
+                if (!polling) {
+                    job = jobs.front();
+                    jobs.pop_front();
+                }
                 active = job;
                 failure = error;
             }
@@ -124,12 +139,15 @@ void Queue::loop(std::promise<void> ready) {
                 job->done.set_value();
             } catch (...) {
                 fail(std::current_exception());
+                idle = {};
                 job->done.set_exception(std::current_exception());
             }
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                pending--;
-                pending_bytes -= job->bytes;
+                if (!polling) {
+                    pending--;
+                    pending_bytes -= job->bytes;
+                }
                 active.reset();
             }
             // Captured COM resources are released before MFShutdown/CoUninitialize.

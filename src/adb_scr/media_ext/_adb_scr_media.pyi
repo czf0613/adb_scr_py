@@ -65,7 +65,9 @@ def enqueue_frame(handle: DecoderHandle, nalu: bytes, pts: int) -> bool:
 
     Notes:
         不等待解码完成。Windows 每包须为完整 access unit，首包为 IDR；
-        B 帧/需帧重排的码流可能缓冲。Windows 解码队列至多 32 项/64 MiB，
+        B 帧/需帧重排的码流可能缓冲。Windows 未输出输入至多 32 帧/64 MiB，
+        同时计入排队任务和 MFT 内部缓存，最旧输入最多等待 5 秒。
+        有未完成输入时工作线程继续检查输出，无需下一包触发。
         超限持久失败，后续读取/提交/状态检查重复抛出原始异常。
     """
 

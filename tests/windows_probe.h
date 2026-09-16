@@ -281,6 +281,19 @@ static PyObject* test_decode_mp4_summary(PyObject* self, PyObject* args) {
     return Py_BuildValue("{s:K,s:K,s:L,s:L,s:L,s:I}", "samples", count, "bytes", bytes,
         "first_pts_100ns", first, "last_pts_100ns", last, "end_100ns", end, "pcm_peak", peak);
 }
+static PyObject* test_delay_decoder_output(PyObject* self, PyObject* args) {
+    (void)self;
+    PyObject* capsule;
+    unsigned polls;
+    int expired = 0;
+    if (!PyArg_ParseTuple(args, "OI|p", &capsule, &polls, &expired)) { return nullptr; }
+    auto handle = decoder_handle(capsule);
+    if (!handle || !native([&] {
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        handle->decoder->delay_output(polls, expired != 0);
+    })) { return nullptr; }
+    Py_RETURN_NONE;
+}
 static PyObject* test_block(PyObject* self, PyObject* args) {
     (void)self;
     PyObject* capsule;
@@ -361,6 +374,7 @@ static PyObject* test_copy_rows(PyObject* self, PyObject* args) {
     return Py_BuildValue("ly#", stride, packed.data(), static_cast<Py_ssize_t>(packed.size()));
 }
 #define WINDOWS_PROBE_METHODS \
+    {"test_delay_decoder_output", test_delay_decoder_output, METH_VARARGS, NULL}, \
     {"test_make_aac", test_make_aac, METH_VARARGS, NULL}, \
     {"test_make_h264", test_make_h264, METH_VARARGS, NULL}, \
     {"test_read_jpeg", test_read_jpeg, METH_VARARGS, NULL}, \
