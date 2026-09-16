@@ -3,7 +3,8 @@
 首版面向近年的 Windows 10/11 x64 和 Windows on ARM64。使用系统
 Media Foundation、D3D11、WIC，不依赖 FFmpeg、显卡厂商 SDK 或 OpenMP。
 扩展由 `setup.py` 编译为当前 Python ABI/架构的 `.pyd`，不用 CMake。
-本机测试是 Windows x64；ARM64 构建和运行需由原生 ARM64 CI/实机验证。
+本机测试是 Windows x64；原生 ARM64 CI 已通过构建及无设备媒体验证，
+ARM64 手机连接和 Windows 10 仍需实机验证。
 
 ## 构建与无设备测试
 
