@@ -63,6 +63,21 @@ artifact 保存，不发布到 PyPI 或 GitHub Release。独立的 wheel 发布 
 
 ## 本地复现
 
+### Windows 矩阵
+
+独立的 [windows.yml](../.github/workflows/windows.yml) 覆盖 Windows x64
+3.10/3.14/3.14t，以及原生 ARM64 3.14/3.14t。`actions/setup-python`
+显式选择 `x64` 或 `arm64` 和普通/无 GIL ABI，再将输出的可执行文件绝对
+路径交给 `uv sync --python`；不能仅用 `3.14t` 让 uv 在 ARM64 上自行选择，
+它可能找到可仿真运行的 x64 解释器。环境创建后仍检查实际架构及 GIL 状态。
+
+x64 普通 Python 安装 MCP extra；ARM64 和 3.14t 只检查核心库，避免可选
+依赖缺少相应 wheel（ARM64 cryptography/OpenSSL、3.14t pywin32）阻塞
+媒体后端。Windows 测试以系统编码器生成素材，用系统解码器回读，保留所有
+核心媒体用例，不依赖 FFmpeg 或 ADB。具体构建步骤见 [Windows 文档](windows.md)。
+
+### macOS 本地复现
+
 先按 [独立环境步骤](python-compatibility.md#独立环境中的-310-构建和测试) 创建
 临时源码副本；不要在日常工作树里切换 `.venv`。在该临时副本中执行，替换版本
 即可复现其他矩阵项：

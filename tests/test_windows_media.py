@@ -106,19 +106,20 @@ def test_phone_dimensions(probe, w, h):
         assert len(frame_ready(media, handle)[2]) == w * h * 4
 
 
-@pytest.mark.parametrize("attempt", range(12))
-def test_static_recording_has_full_duration_and_exclusive_path(probe, clip, tmp_path, attempt):
+@pytest.mark.parametrize("attempt", range(4))
+@pytest.mark.parametrize("end_pts", [0, 1000, 2_000_000])
+def test_static_recording_has_full_duration_and_exclusive_path(probe, clip, tmp_path, attempt, end_pts):
     from adb_scr.media_ext import _adb_scr_media as media
     path = tmp_path / "静止画面.mp4"
     with decoder(media, clip) as (_, _, handle):
         recorder = media.start_recording(handle, str(path), None, 0, 30, 0.75)
         media.set_decoder_recording(handle, None)
-        media.stop_recording(recorder, 2_000_000)
-        media.stop_recording(recorder, 2_000_000)
+        media.stop_recording(recorder, end_pts)
+        media.stop_recording(recorder, end_pts)
         packets = probe.test_read_mp4(str(path))
         assert packets[0][0] == 0
         end = max(pts + duration for pts, duration, _ in packets)
-        assert abs(end - 20_000_000) <= 1000, [(p, d) for p, d, _ in packets]
+        assert abs(end - max(1000, end_pts) * 10) <= 1000, [(p, d) for p, d, _ in packets]
         before = path.read_bytes()
         with pytest.raises(RuntimeError):
             media.start_recording(handle, str(path), None, 0, 30)

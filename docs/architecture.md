@@ -82,6 +82,8 @@ BGRA8 固定自顶向下、width*4 行步长、width*height*4 字节、alpha=255
 跨线程快照持有 MF/D3D 生命周期；系统内存 RGB 明确正步长，带 padding
 的表面通过系统 `MFCopyImage` 打包。录制旋转使用视频处理器并显式规范
 NV12 黑边。Windows MP4 最短时长为 1 毫秒，AAC 大间隙/重叠明确失败；
+停止时先在录制 MTA 线程等待首个已提交视频样本到达 sink，仍受原有 5 秒
+积压预算约束，再调用 Finalize 排空剩余输出，避免冷启动立即停止时出现空 sink。
 没有移植 macOS 的空编辑修复。下文 VideoToolbox/GCD/Metal 的具体实现
 描述属于 macOS；Windows 对应细节及限制见 [Windows 文档](windows.md)。
 

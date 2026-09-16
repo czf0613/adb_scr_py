@@ -378,6 +378,17 @@ void Recorder::stop(int64_t end_pts) {
             if (pending && pending_pts < end) {
                 write_video(pending, pending_pts, end - pending_pts);
             }
+            // With throttling disabled, WriteSample may return before the first
+            // encoded sample reaches the sink. Finalizing a cold Windows sink
+            // in that state can fail with MF_E_SINK_NO_SAMPLES_PROCESSED.
+            // Wait for actual progress under the existing five-second budget;
+            // Finalize still drains any remaining encoder output afterwards.
+            while (!video_budget.outstanding.empty() && video_budget.outstanding.front().sequence == 1) {
+                check_sink_budget(video_stream, video_budget, 32, 128 * 1024 * 1024);
+                if (!video_budget.outstanding.empty() && video_budget.outstanding.front().sequence == 1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
         } catch (...) {
             queue.fail(std::current_exception());
         }

@@ -12,7 +12,7 @@ x64/ARM64 工具链。系统需具备 Media Foundation 和系统 H.264/AAC/WIC
 组件；缺少媒体组件的 Windows N 安装需要先安装 Media Feature Pack。
 
 ```powershell
-uv sync --python 3.14 --locked --extra mcp --no-install-project
+uv sync --python 3.14 --locked --no-install-project
 uv run --python 3.14 --locked setup.py build_ext --inplace
 uv run --python 3.14 --locked pytest tests/test_windows_media.py tests/test_windows_media_errors.py -q
 ```
@@ -37,11 +37,15 @@ uv run --python 3.14 --locked tests/windows_device_smoke.py --duration 60 --outp
 完整的 Windows 无设备验证入口为 `.github/scripts/check_windows.py`：
 在独立源树中构建 sdist/wheel、安装 wheel 后，用相应解释器运行该脚本。
 它检查源码语法、包内容、已安装模块、媒体测试和 GIL 状态。
-Windows 3.14t 使用 `--core-only`，不安装可选 MCP extra：其 pywin32 312
-依赖目前没有 cp314t wheel。此限制不影响已验证的核心媒体库。
+Windows 3.14t 和 ARM64 CI 使用 `--core-only`，不安装可选 MCP extra：
+pywin32 312 没有 cp314t wheel；锁定的 cryptography 在 ARM64 上会转入源码
+编译并要求额外 OpenSSL 工具链。x64 普通 Python 继续安装并检查 MCP 模块。
+这些是可选依赖的覆盖边界，核心媒体库的测试保持开启。
 `.github/workflows/windows.yml` 覆盖 x64 的 3.10/3.14/3.14t 和 ARM64 的
-3.14/3.14t。ARM64 矩阵使用原生 `windows-11-arm`，不会把 x64 仿真当作
-原生 ARM64 验证。现有正式发布工作流仍为 macOS；Windows 暂提供源码构建
+3.14/3.14t。通过 `actions/setup-python` 显式选择架构和 ABI，并将解释器
+绝对路径传给 `uv sync --python`，避免 ARM64 上的版本选择回落到 x64 仿真。
+随后核对实际 `sysconfig.get_platform()`，使用原生 `windows-11-arm` 验证。
+现有正式发布工作流仍为 macOS；Windows 暂提供源码构建
 和独立 CI 产物，尚未发布 Windows wheel。
 
 本机已完成 Windows 11 x64 / Android 14 竖屏真机测试：最终构建录制约
@@ -163,6 +167,13 @@ Windows 会话每 100 ms 独立检查原生失败，无需等待手机下一包�
 开始时提交 1 毫秒零时刻画面，之后保留一帧直到下一 PTS 或 stop，补齐
 静止画面的时长。最短录制 1 毫秒；视频时间戳按系统 MP4 timescale 量化。
 SinkWriter 在 start 返回前接收首帧，最终文件只在 stop 成功后可用。
+
+禁用隐式限流后，首帧提交成功不代表已经到达 MP4 sink。冷启动后立即停止
+可能在尚未编码任何样本时进入 Finalize，返回 `MF_E_SINK_NO_SAMPLES_PROCESSED`。
+stop 在录制 MTA 线程检查已处理样本计数，等待首个视频样本通过后再 Finalize，
+由 Finalize 排空后续输出。该等待受现有 5 秒积压预算限制，超时仍保存并抛过载
+错误；没有固定启动延时、重试 Finalize 或忽略错误。失败信息包含收尾前的视频
+接收/编码/处理计数，便于定位平台差异。回归覆盖立即停止、1 毫秒和 2 秒静止录制。
 
 连续音频下，Windows MP4 sink 需要视频时间轴持续前进，否则会停止接收
 更多 AAC。音频领先 pending 视频满 1 秒时，用同一画面补一段视频，提交到
