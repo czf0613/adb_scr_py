@@ -27,6 +27,9 @@ def prepare_release(artifacts: Path, output: Path, version: str,
         tags.extend(f"cp{minor}-cp{minor}-macosx_{macos}_0_arm64"
                     for minor in range(310, 315))
         tags.append(f"cp314-cp314t-macosx_{macos}_0_arm64")
+    tags.extend(f"cp{minor}-cp{minor}-win_amd64" for minor in range(310, 315))
+    tags.extend(["cp314-cp314t-win_amd64", "cp314-cp314-win_arm64",
+                 "cp314-cp314t-win_arm64"])
     expected = {f"adb_scr_py-{version}-{tag}.whl": tag for tag in tags}
     wheels = sorted(artifacts.rglob("*.whl"))
     if len(wheels) != len(expected) or {path.name for path in wheels} != set(expected):

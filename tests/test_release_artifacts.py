@@ -1,4 +1,4 @@
-"""Release bundles must contain exactly the tested macOS arm64 distributions."""
+"""Release bundles must contain all tested macOS and Windows distributions."""
 
 import importlib.util
 import io
@@ -23,10 +23,13 @@ def artifacts(tmp_path):
     root = tmp_path / "artifacts"
     abis = [("310", "310"), ("311", "311"), ("312", "312"),
             ("313", "313"), ("314", "314"), ("314", "314t")]
-    for macos, (python, abi) in product((15, 26), abis):
-        directory = root / f"wheel-macos-{macos}-{abi}"
+    tags = [f"cp{python}-cp{abi}-macosx_{macos}_0_arm64"
+            for macos, (python, abi) in product((15, 26), abis)]
+    tags.extend(f"cp{python}-cp{abi}-win_amd64" for python, abi in abis)
+    tags.extend(["cp314-cp314-win_arm64", "cp314-cp314t-win_arm64"])
+    for tag in tags:
+        directory = root / f"wheel-{tag}"
         directory.mkdir(parents=True)
-        tag = f"cp{python}-cp{abi}-macosx_{macos}_0_arm64"
         metadata = b"Metadata-Version: 2.4\nName: adb_scr_py\nVersion: 0.3.0\n"
         wheel = directory / f"adb_scr_py-0.3.0-{tag}.whl"
         with zipfile.ZipFile(wheel, "w") as archive:
@@ -39,10 +42,10 @@ def artifacts(tmp_path):
     return root
 
 
-def test_complete_bundle_contains_twelve_wheels_and_one_sdist(artifacts, tmp_path):
+def test_complete_bundle_contains_twenty_wheels_and_one_sdist(artifacts, tmp_path):
     output = tmp_path / "dist"
     load_prepare_release()(artifacts, output, "0.3.0", "v0.3.0")
-    assert len(list(output.glob("*.whl"))) == 12
+    assert len(list(output.glob("*.whl"))) == 20
     assert len(list(output.glob("*.tar.gz"))) == 1
     for path in output.iterdir():
         assert path.read_bytes() == next(artifacts.rglob(path.name)).read_bytes()
@@ -52,6 +55,20 @@ def test_complete_bundle_contains_twelve_wheels_and_one_sdist(artifacts, tmp_pat
 def test_missing_macos_target_is_rejected(artifacts, tmp_path, macos):
     for wheel in artifacts.rglob(f"*macosx_{macos}_0_arm64.whl"):
         wheel.unlink()
+    output = tmp_path / "dist"
+    with pytest.raises(ValueError, match="wheel set"):
+        load_prepare_release()(artifacts, output, "0.3.0")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("tag", [
+    "cp310-cp310-win_amd64", "cp311-cp311-win_amd64",
+    "cp312-cp312-win_amd64", "cp313-cp313-win_amd64",
+    "cp314-cp314-win_amd64", "cp314-cp314t-win_amd64",
+    "cp314-cp314-win_arm64", "cp314-cp314t-win_arm64",
+])
+def test_missing_windows_abi_is_rejected(artifacts, tmp_path, tag):
+    next(artifacts.rglob(f"*-{tag}.whl")).unlink()
     output = tmp_path / "dist"
     with pytest.raises(ValueError, match="wheel set"):
         load_prepare_release()(artifacts, output, "0.3.0")
@@ -92,6 +109,20 @@ def test_incorrect_wheel_metadata_is_rejected(artifacts, tmp_path, metadata_file
     with zipfile.ZipFile(wheel) as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
     members[f"adb_scr_py-0.3.0.dist-info/{metadata_file}"] = content.encode()
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    output = tmp_path / "dist"
+    with pytest.raises(ValueError, match="metadata"):
+        load_prepare_release()(artifacts, output, "0.3.0")
+    assert not output.exists()
+
+
+def test_windows_wheel_with_wrong_architecture_metadata_is_rejected(artifacts, tmp_path):
+    wheel = next(artifacts.rglob("*-cp314-cp314-win_arm64.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members["adb_scr_py-0.3.0.dist-info/WHEEL"] = b"Tag: cp314-cp314-win_amd64\n"
     with zipfile.ZipFile(wheel, "w") as archive:
         for name, data in members.items():
             archive.writestr(name, data)

@@ -1,7 +1,7 @@
-# macOS arm64 wheel 与 PyPI 发布
+# macOS / Windows wheel 与 PyPI 发布
 
-[release.yml](../.github/workflows/release.yml) 构建 Python 3.10、3.11、3.12、
-3.13、3.14、3.14t 的 arm64 wheel，并在成功验证后通过 Trusted Publishing 发布。
+[release.yml](../.github/workflows/release.yml) 构建 macOS arm64、Windows x64 和
+Windows ARM64 wheel，并在全部产物成功验证后通过 Trusted Publishing 一起发布。
 普通 `master` push 仍只运行 [CI](ci.md)。
 
 ## 产物与兼容范围
@@ -27,16 +27,31 @@ arm64。发布的 wheel 标签为：
 该 macOS 工作流不生成 x86_64 或 universal2 wheel，也不承诺较老 macOS 的源码
 构建兼容性。平台标签含义见 [Python 打包规范](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/#macos)。
 
-各任务安装 `mcp` extra，复用 `check_ci.py` 验证已安装 wheel、归档内容、ABI、
+macOS 各任务安装 `mcp` extra，复用 `check_ci.py` 验证已安装 wheel、归档内容、ABI、
 Agent 指南、MCP HTTP/信号测试及其他无设备测试和 GIL 状态。
 云端不覆盖真实 VideoToolbox 媒体硬件；验证边界及本地硬件测试见 [CI 文档](ci.md)。
 普通 3.14 显式选择 `3.14+gil`，3.14t 独立构建，不强制设置 GIL 状态。
 构建与 Ubuntu 汇总任务先用 `uv python install` 安装解释器，再运行版本选择；
 普通 3.14 安装请求为 `3.14`，运行选择为 `3.14+gil`，避免无可用下载的 `+gil` 请求。
 
-12 个构建/安装测试任务全部成功后，`prepare_release.py` 检查两个平台各六种 wheel 是否齐全、
-平台/ABI 是否正确、文件名与包元数据版本是否一致，然后选择一份 sdist。
-`twine check --strict` 通过后，将 **12 个 wheel + 1 个 sdist** 保存为
+Windows 发布矩阵为：
+
+| runner | 架构 / wheel 平台标签 | Python |
+| --- | --- | --- |
+| `windows-2025` | x64 / `win_amd64` | 3.10、3.11、3.12、3.13、3.14、3.14t |
+| `windows-11-arm` | ARM64 / `win_arm64` | 3.14、3.14t |
+
+Windows 使用 `actions/setup-python` 显式选择架构与 ABI，再把解释器绝对路径
+交给 uv。各任务通过 `setup.py` 构建扩展，从 sdist 构建 wheel，安装后执行
+`check_windows.py` 检查包内容、实际导入路径、ABI、系统编解码及无设备测试。
+3.14t 在导入前后和测试后确认 GIL 关闭，不强制 GIL 状态。x64 普通 Python
+安装并检查 MCP extra；ARM64 和 3.14t 仅验证核心库，保留现有可选依赖限制。
+Windows 的源码构建要求和媒体验证边界见 [Windows 文档](windows.md)。
+
+全部 20 个构建/安装测试任务成功后，`prepare_release.py` 检查 12 个 macOS 和
+8 个 Windows wheel 是否齐全、平台/ABI 是否正确、文件名与包元数据版本是否一致，
+然后选择一份 sdist。任一构建、测试或完整性校验失败都会阻止发布。
+`twine check --strict` 通过后，将 **20 个 wheel + 1 个 sdist** 保存为
 `pypi-distributions` artifact，保留 30 天。各 Python 的原始产物和 JUnit 报告也保留
 30 天。汇总时先下载到独立目录，避免不同任务同名 sdist 互相覆盖。
 
@@ -72,5 +87,5 @@ gh workflow run release.yml --ref master
 GitHub Release 的 `published` 事件触发全部构建测试，通过后自动上传 PyPI。
 
 只有已验证的那批文件会上传；不会在发布 job 再次构建。未开启跳过已存在文件，
-版本/文件冲突会报错。PyPI 上传与依赖身份验证的完整链路，要到首次正式发布时
-才能验证；手动试构建不执行 PyPI 上传。
+版本/文件冲突会报错。手动试构建不执行 PyPI 上传，实际上传与 Trusted Publishing
+身份验证结果以正式发布运行及 PyPI 文件清单为准。

@@ -47,6 +47,11 @@ pywin32 312 没有 cp314t wheel；锁定的 cryptography 在 ARM64 上会转入�
 绝对路径传给 `uv sync --python`，避免 ARM64 上的版本选择回落到 x64 仿真。
 随后核对实际 `sysconfig.get_platform()`，使用原生 `windows-11-arm` 验证。
 
+正式发布由 [release.yml](../.github/workflows/release.yml) 构建 Windows x64
+的 Python 3.10–3.14、3.14t，以及 ARM64 的 3.14、3.14t wheel。每个 wheel
+从 sdist 构建、安装并完成无设备验证后，与 macOS 产物一起通过完整性校验，
+再统一上传 PyPI；任一平台失败都会阻止发布，详见 [发布流程](releasing.md)。
+
 本机已完成 Windows 11 x64 / Android 14 竖屏真机测试：最终构建录制约
 60.2 秒，1715 个视频样本全部解码，2822 个 AAC 包直通一致且可解码；
 BGRA8/JPEG 同时取帧、重连与断开自动收尾通过。最终安装包的无设备回归为

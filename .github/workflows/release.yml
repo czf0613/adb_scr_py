@@ -1,4 +1,4 @@
-name: macOS arm64 wheels and PyPI release
+name: macOS and Windows wheels and PyPI release
 
 on:
   release:
@@ -103,9 +103,100 @@ jobs:
           path: test-results.xml
           retention-days: 30
 
+  build-windows-wheels:
+    name: Build on ${{ matrix.os }} ${{ matrix.arch }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2025, python: "3.10", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.11", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.12", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.13", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.14", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.14t", arch: x64, mcp: false}
+          - {os: windows-11-arm, python: "3.14", arch: arm64, mcp: false}
+          - {os: windows-11-arm, python: "3.14t", arch: arm64, mcp: false}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select native Python architecture and ABI
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: release-windows-${{ matrix.arch }}-${{ matrix.python }}
+
+      - name: Install locked dependencies
+        # Match Windows CI: optional MCP dependencies lack ARM64 / cp314t wheels.
+        run: uv sync --python "${{ steps.python.outputs.python-path }}" --locked ${{ matrix.mcp && '--extra mcp' || '' }} --no-install-project
+
+      - name: Verify architecture and release version
+        run: |
+          uv run --no-sync python -c "import sysconfig; assert sysconfig.get_platform() == '${{ matrix.arch == 'arm64' && 'win-arm64' || 'win-amd64' }}', sysconfig.get_platform()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            $version = uv version --short
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($env:RELEASE_TAG -ne "v$version") { throw "Release tag must match v$version" }
+          }
+
+      - name: Build native extension in place
+        run: uv run --no-sync setup.py build_ext --inplace
+
+      - name: Build sdist and wheel for the target Windows architecture
+        run: |
+          uv build --python .venv/Scripts/python.exe --sdist --out-dir dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sourceArchive = (Get-ChildItem dist/*.tar.gz).FullName
+          uv build --python .venv/Scripts/python.exe --wheel $sourceArchive --out-dir dist
+
+      - name: Install and verify the built wheel
+        run: |
+          $wheel = (Get-ChildItem dist/*.whl).FullName
+          uv pip install --python .venv/Scripts/python.exe --no-deps $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync python -Werror::RuntimeWarning .github/scripts/check_windows.py "${{ matrix.python }}" ${{ !matrix.mcp && '--core-only' || '' }}
+
+      - name: Save tested distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-wheel-windows-${{ matrix.arch }}-${{ matrix.python }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Save test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-build-test-windows-${{ matrix.arch }}-${{ matrix.python }}
+          path: test-results.xml
+          retention-days: 30
+
   prepare-release:
     name: Validate and assemble PyPI distributions
-    needs: build-wheels
+    needs: [build-wheels, build-windows-wheels]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -129,7 +220,7 @@ jobs:
           pattern: release-wheel-*
           path: artifacts
 
-      - name: Require six arm64 ABIs for both macOS targets and select one sdist
+      - name: Require all macOS and Windows wheels and select one sdist
         run: >-
           uv run --no-project python .github/scripts/prepare_release.py artifacts dist
           --version "$(uv version --short)" --release-tag "$RELEASE_TAG"
