@@ -40,9 +40,9 @@ flowchart TD
 | `consts.py` | 进程级可变配置；始终通过 `consts.XXX` 读取 |
 | `async_utils.py` | 在取消时等待已取得所有权的操作完成；关闭流、终止并回收子进程 |
 | `adb_cmd/base.py` | 有超时和取消清理的 ADB 子进程执行；设备枚举、transport 连接等 |
-| `adb_cmd/device_control.py` | 推送、应用命令、启动并转交 scrcpy 进程所有权 |
+| `adb_cmd/device_control.py` | 文件/bytes 双向传输、应用命令、启动并转交 scrcpy 进程所有权 |
 | `device/options.py` | 不可变、经验证的公开 `ConnectionOptions` |
-| `device/android_device.py` | 连接、回滚、会话监控、断连通知、显式重连、截图和手势 |
+| `device/android_device.py` | 连接、回滚、会话监控、断连通知、显式重连、截图、手势和文件传输 |
 | `device/control_handle.py` | 视频/可选音频/控制流、接收任务、解码器替换、控制发送、幂等关闭 |
 | `device/audio_stream.py` | scrcpy AAC 编码器头、配置和带 PTS 的包解析；区分禁用和异常断流 |
 | `device/recording.py` | 录制 start/stop/取消所有权、音频入队、PTS/单调时钟映射及错误保存 |
@@ -110,6 +110,25 @@ NV12 黑边。Windows MP4 最短时长为 1 毫秒，AAC 大间隙/重叠明确�
 
 FPS 是下一次启动服务端使用的进程级上限，不影响已运行会话；模块导入先后不影响 `consts.SCREEN_FPS` 的动态读取。
 
+## 文件传输与临时文件所有权
+
+公开 `AndroidDevice.push_file(source, remote_path, *, timeout=60.0)` 和
+`pull_file(remote_path, local_path=None, *, timeout=60.0)` 复用现有 ADB 子进程执行器。
+路径模式直接运行 push/pull，手机路径要求绝对路径，本地路径转换成绝对路径，
+通过参数数组执行，避免将文件名解释为 shell 代码或 ADB 选项。scrcpy 服务端
+载荷仍通过同一个内部 `push_file()` 推送，连接总超时继续约束该阶段。
+
+bytes 模式在独立临时目录中写入或拉取文件，再使用相同命令；不依赖 shell cat、
+PTY 或文本编码。临时目录创建及所有权安装、本地读写、清理通过
+`complete_on_cancel(asyncio.to_thread(...))` 等待完成，取消不能令后台文件操作
+继续使用已删除的路径。ADB 超时/取消先 kill 并回收子进程，再删除临时目录。
+路径模式沿用 ADB 的覆盖与部分写入语义，不做远端或调用方本地文件回滚。
+
+操作使用设备锁，与该实例的连接/断开及应用命令串行；可能延后断开取得锁。
+命令超时默认 60 秒、可配置，不包含锁等待及本地 I/O/清理。
+只要求已有可访问的 ADB transport，不要求 scrcpy 或解码帧，不自动建立 TCP 连接。
+bytes 下载完整驻留内存；大文件使用路径模式。返回约定见 [API](api.md#文件传输)。
+
 ## 接收协议与故障检测
 
 视频元数据为 1 字节确认、64 字节设备名、编码器 ID/宽/高各 4 字节，共 77 字节。必须确认 H.264 且尺寸为正。每个视频包由 8 字节标志/微秒 PTS、4 字节 payload 长度和 H.264 payload 组成。
@@ -169,7 +188,7 @@ JPEG 直出在 GCD 队列内取得 retain 的帧快照，随后在队列外编�
 | 机制 | 保护内容 |
 | --- | --- |
 | 模块级 asyncio 锁 | 库初始化/反初始化 |
-| 设备 asyncio 锁 | 会话建立/回收、应用命令、指定手势序列 |
+| 设备 asyncio 锁 | 会话建立/回收、应用命令、文件传输、指定手势序列 |
 | 控制句柄 asyncio 锁 | 解码器创建/替换、取帧、入队、录制订阅切换和关闭 |
 | 录制控制器 asyncio 锁 | start/stop 与 AAC 提交；停止获取解码器锁前先获取此锁 |
 | Capsule 容器原生锁 | 同一原生 decoder 的操作、JPEG 编码器复用与销毁 |
@@ -192,8 +211,19 @@ SDK 子应用挂载在根路径，最终端点是 `/mcp`；父应用另提供 `/
 
 `runtime.py` 拥有库初始化、每个 serial 的唯一 `AndroidDevice`、设备访问锁和
 在途操作任务集合。创建连接前即登记所有权，失败/取消连接仍可在退出时清理。
-同设备工具串行执行，不同设备并行。`tools.py` 完成 MCP 参数校验及公共 API
-适配，截图返回 JPEG image 内容，控制返回提交状态；媒体/BGRA8 管线保持原样。
+同设备修改操作串行执行，不同设备并行。断连/媒体错误观察工具只在选择设备时
+取得访问锁，随后直接绑定并等待本次会话，避免阻塞需要等待的断开；等待任务仍
+登记在在途操作集合中，关闭时取消并等待。超时仅取消观察，不断开设备。
+ADB 文件/应用操作通过 `adb_device()` 复用同一 serial 的访问锁，未建立媒体会话
+时使用临时 `AndroidDevice`，不登记媒体会话或取得 TCP transport 所有权。
+后续 connect 复用已有锁，避免文件传输与连接/断开并行改变 transport。
+
+`tools.py` 完成 MCP 参数校验及公共 API 适配；截图返回 JPEG image 内容，
+文件 bytes 使用严格 Base64 输入/输出，本地路径指服务端电脑。连接工具接受
+完整 `ConnectionOptions`，已有连接须先断开才能改变选项；省略则复用原配置。
+帧率工具影响未来连接，`action_series` 透传 `check`，默认完整校验。
+全部公共设备方法都有工具映射；初始化/反初始化由 lifespan 管理，版本结果
+通过 `get_library_info` 获取。媒体/BGRA8 管线保持原样。
 
 `server.py` 的专用 Uvicorn runner 捕获 SIGINT/SIGTERM，仅标记退出请求并拒绝新工具，
 重复信号也不设置 `force_exit`。先等待 HTTP drain，超时取消请求，然后退出 MCP

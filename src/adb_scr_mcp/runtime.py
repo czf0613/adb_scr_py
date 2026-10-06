@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 
 import adb_scr
 from adb_scr.async_utils import complete_on_cancel
@@ -64,6 +65,7 @@ class Runtime:
             "connection_type": device.connection_type if device else None,
             "screen_size": {"width": size[0], "height": size[1]} if size else None,
             "last_disconnect_reason": device.last_disconnect_reason if device else None,
+            "options": asdict(device.options) if device else None,
         }
 
     async def list_devices(self) -> dict:
@@ -72,18 +74,27 @@ class Runtime:
             serials = dict.fromkeys([*available, *self.devices])
             return {"devices": [self.info(serial) for serial in serials]}
 
-    async def connect(self, serial: str, connection_type: str) -> dict:
+    async def connect(
+        self, serial: str, connection_type: str,
+        options: adb_scr.ConnectionOptions | None = None,
+    ) -> dict:
         async with self.operation():
             if serial not in self.devices:
                 # Register ownership before the first await, including failed connects.
-                self.devices[serial] = adb_scr.AndroidDevice(serial, connection_type)
-                self._locks[serial] = asyncio.Lock()
+                self.devices[serial] = adb_scr.AndroidDevice(
+                    serial, connection_type, options=options
+                )
+                self._locks.setdefault(serial, asyncio.Lock())
             async with self._locks[serial]:
                 device = self.devices[serial]
                 if device.connection_type != connection_type:
                     raise ValueError(
                         "Device already registered with a different connection_type"
                     )
+                if options is not None and device.options != options:
+                    if device.is_connected:
+                        raise ValueError("Disconnect before changing connection options")
+                    device.options = options
                 if not device.is_connected and not await device.connect():
                     raise RuntimeError(
                         f"Unable to connect {serial}: {device.last_disconnect_reason}"
@@ -91,7 +102,9 @@ class Runtime:
                 return self.info(serial)
 
     @asynccontextmanager
-    async def device(self, serial: str, *, require_connected: bool = True):
+    async def device(
+        self, serial: str, *, require_connected: bool = True, exclusive: bool = True,
+    ):
         async with self.operation():
             if serial not in self.devices:
                 raise ValueError(f"Unknown device {serial}; call connect_device first")
@@ -101,6 +114,23 @@ class Runtime:
                     raise RuntimeError(
                         f"Device {serial} is disconnected; reconnect explicitly"
                     )
+                if exclusive:
+                    yield device
+                    return
+            # Observers must not prevent the disconnect/reconnect they await.
+            yield device
+
+    @asynccontextmanager
+    async def adb_device(self, serial: str):
+        """Serialize ADB-only work without starting or owning a media session."""
+        async with self.operation():
+            lock = self._locks.setdefault(serial, asyncio.Lock())
+            async with lock:
+                device = self.devices.get(serial)
+                if device is None:
+                    # connection_type is unused by ADB-only methods. In particular,
+                    # this temporary object never connects/disconnects a TCP transport.
+                    device = adb_scr.AndroidDevice(serial, "usb")
                 yield device
 
     async def close(self) -> None:

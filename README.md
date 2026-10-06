@@ -120,7 +120,24 @@ uv run --python 3.14 --locked --extra mcp adb-scr-mcp --port 8000
 ```
 
 客户端地址为 `http://127.0.0.1:8000/mcp`。提供设备枚举/连接、JPEG 截图、触控、
-应用控制及 MP4 录制工具。安装、参数和退出流程见 [MCP 服务文档](docs/mcp.md)。
+应用控制、文件/bytes 双向传输及 MP4 录制工具，并支持连接配置、帧率和
+断连/媒体错误等待。安装、参数和退出流程见 [MCP 服务文档](docs/mcp.md)。
+
+## 文件传输
+
+初始化库且设备已经可通过 ADB 访问后，无需启动屏幕会话即可复制文件：
+
+```python
+device = AndroidDevice("YOUR_DEVICE_SERIAL", "usb")
+await device.push_file("photo.jpg", "/sdcard/Download/photo.jpg")
+await device.push_file(b"hello", "/sdcard/Download/hello.txt")
+await device.pull_file("/sdcard/Download/photo.jpg", "downloaded.jpg")
+data = await device.pull_file("/sdcard/Download/hello.txt")  # bytes；失败为 None
+```
+
+路径支持 `pathlib.Path`；传输默认超时 60 秒，可传 `timeout=` 调整。
+路径模式及上传返回 `bool`；空文件下载为 `b""`。覆盖、权限与失败行为见
+[文件传输 API](docs/api.md#文件传输)。
 
 ## API 索引
 
@@ -131,6 +148,7 @@ uv run --python 3.14 --locked --extra mcp adb-scr-mcp --port 8000
 | `set_screen_record_fps(fps)` | 设置后续会话的帧率上限 |
 | `ConnectionOptions(...)` | 配置连接、I/O、关闭及存活探测 |
 | `AndroidDevice(...)` | 设备会话、截图及控制 API |
+| `await device.push_file(source, remote_path)` / `await device.pull_file(remote_path, local_path=None)` | 本地文件或 bytes 与手机双向传输 |
 | `await device.start_recording(output_file, quality=0.75)` / `await device.stop_recording()` | 开始录制及等待 MP4 文件完成 |
 | `GestureAction` / `GestureActionNode` | 通过 `pointer_id` 区分手指的单指/多指手势序列 |
 | `await deinit_lib()` | 所有设备关闭后停止共享 daemon |

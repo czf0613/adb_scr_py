@@ -10,6 +10,7 @@ from check_ci import check_archives, check_gil, check_imports, check_sources
 TESTS = [
     "tests/test_windows_media.py", "tests/test_windows_media_errors.py",
     "tests/test_device_session.py", "tests/test_recording.py",
+    "tests/test_file_transfer.py",
     "tests/test_lifecycle.py", "tests/test_action_series.py", "tests/test_audio_stream.py",
     "tests/test_jpg.py", "tests/test_free_threading.py",
     "tests/test_native_lifecycle.py::test_cancelled_frame_read_waits_for_native_worker",

@@ -53,11 +53,12 @@ def fake_adb(monkeypatch):
         return ["phone"]
 
     class Device:
-        def __init__(self, serial, connection_type):
+        def __init__(self, serial, connection_type, *, options=None):
             self.serial = serial
             self.connection_type = connection_type
             self.is_connected = False
             self.last_disconnect_reason = None
+            self.options = options or adb_scr.ConnectionOptions()
             self.calls = []
             instances.append(self)
 
@@ -80,8 +81,8 @@ def fake_adb(monkeypatch):
         async def click(self, x, y):
             self.calls.append(("click", x, y))
 
-        async def action_series(self, actions):
-            self.calls.append(("actions", actions))
+        async def action_series(self, actions, check=True):
+            self.calls.append(("actions", actions, check))
 
         async def launch_app(self, package_name, activity_name):
             self.calls.append(("launch", package_name, activity_name))
@@ -478,6 +479,7 @@ def test_control_and_recording_tools_preserve_arguments(
                         ),
                         adb_scr.GestureActionNode(3, 4, adb_scr.GestureAction.UP, 5, 4),
                     ],
+                    True,
                 ),
                 ("start_recording", output, 0.75),
                 ("stop_recording",),
@@ -650,5 +652,241 @@ def test_anyio_startup_cancellation_waits_for_init_and_cleanup(fake_adb, monkeyp
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(starting, 2)
         assert events == ["init-end", "deinit-end"]
+
+    asyncio.run(run())
+
+
+def test_all_public_device_methods_have_mcp_coverage():
+    import inspect
+
+    from adb_scr.device.android_device import AndroidDevice
+
+    # Public names must be deliberately mapped when the library grows.
+    mapping = {
+        "connect": "connect_device", "disconnect": "disconnect_device",
+        "get_screenshot_jpg": "screenshot", "get_screen_size": "get_screen_size",
+        **{name: name for name in (
+            "click", "double_click", "long_press", "swipe", "action_series",
+            "press_back", "paste", "launch_app", "stop_app", "start_recording",
+            "stop_recording", "wait_disconnected", "wait_media_error", "push_file", "pull_file",
+        )},
+    }
+    public = {name for name, _ in inspect.getmembers(AndroidDevice, inspect.isfunction)
+              if not name.startswith("_")}
+    assert public == mapping.keys()
+
+    from mcp.server.fastmcp import FastMCP
+    from adb_scr_mcp.runtime import Runtime
+    from adb_scr_mcp.tools import register_tools
+
+    mcp = FastMCP("coverage")
+    register_tools(mcp, Runtime())
+    catalog = asyncio.run(mcp.list_tools())
+    names = {tool.name for tool in catalog}
+    assert set(mapping.values()) <= names
+    assert {"list_devices", "set_screen_record_fps", "get_library_info"} <= names
+
+
+def test_mcp_transfers_preserve_binary_and_empty_data_without_connect(fake_adb, monkeypatch, tmp_path):
+    events, instances, Device = fake_adb
+    payloads = [b"", b"\x00\xff\r\n\x80payload"]
+    transferred = {}
+
+    async def push(self, source, remote_path, *, timeout):
+        assert not self.is_connected
+        assert timeout == 12.5
+        transferred[remote_path] = source
+        return True
+
+    async def pull(self, remote_path, local_path, *, timeout):
+        assert not self.is_connected
+        assert timeout == 12.5
+        return transferred[remote_path] if local_path is None else True
+
+    monkeypatch.setattr(Device, "push_file", push, raising=False)
+    monkeypatch.setattr(Device, "pull_file", pull, raising=False)
+
+    async def run():
+        app = create_app()
+        async with client_for(app) as client:
+            for index, payload in enumerate(payloads):
+                remote = f"/sdcard/{index}.bin"
+                result = await call(client, "push_file", serial="phone", remote_path=remote,
+                                    data_base64=base64.b64encode(payload).decode(), timeout=12.5)
+                assert not result["isError"]
+                result = await call(client, "pull_file", serial="phone", remote_path=remote, timeout=12.5)
+                assert not result["isError"]
+                body = result["structuredContent"]
+                assert base64.b64decode(body["data_base64"]) == payload
+                assert body["size"] == len(payload)
+            path = str(tmp_path / "file with spaces.bin")
+            assert not (await call(client, "push_file", serial="phone", remote_path="/sdcard/path",
+                                   local_path=path, timeout=12.5))["isError"]
+            assert transferred["/sdcard/path"] == path
+            result = await call(client, "pull_file", serial="phone", remote_path="/sdcard/path",
+                                local_path=path, timeout=12.5)
+            assert result["structuredContent"]["local_path"] == path
+            assert "data_base64" not in result["structuredContent"]
+            assert app.state.runtime.devices == {}
+            assert all(not device.is_connected for device in instances)
+        assert events == [("init", None), "deinit"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("options", [
+    {}, {"local_path": "file", "data_base64": ""},
+    {"data_base64": "!not-base64!"}, {"data_base64": "中文"},
+    {"local_path": ""}, {"local_path": "bad\0file"},
+    {"data_base64": "", "remote_path": "relative"},
+    {"data_base64": "", "timeout": 0},
+])
+def test_invalid_transfer_inputs_do_not_touch_device(fake_adb, options):
+    _, instances, _ = fake_adb
+
+    async def run():
+        async with client_for(create_app()) as client:
+            arguments = {"serial": "phone", "remote_path": "/target", **options}
+            assert (await call(client, "push_file", **arguments))["isError"]
+            assert instances == []
+
+    asyncio.run(run())
+
+
+def test_transfer_failures_are_tool_errors(fake_adb, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    _, _, Device = fake_adb
+    monkeypatch.setattr(Device, "push_file", AsyncMock(return_value=False), raising=False)
+    monkeypatch.setattr(Device, "pull_file", AsyncMock(side_effect=[None, False]), raising=False)
+
+    async def run():
+        async with client_for(create_app()) as client:
+            for name, kwargs in [
+                ("push_file", {"data_base64": ""}),
+                ("pull_file", {}), ("pull_file", {"local_path": "out.bin"}),
+            ]:
+                result = await call(client, name, serial="phone", remote_path="/target", **kwargs)
+                assert result["isError"]
+
+    asyncio.run(run())
+
+
+def test_options_fps_and_dimensions_roundtrip(fake_adb, monkeypatch):
+    from adb_scr import consts
+
+    _, instances, _ = fake_adb
+    monkeypatch.setattr(consts, "SCREEN_FPS", 30)
+
+    async def run():
+        async with client_for(create_app()) as client:
+            initial = (await call(client, "get_library_info"))["structuredContent"]
+            assert initial == {"adb_version": "test-adb", "scrcpy_version": "3.2", "screen_record_fps": 30}
+            assert (await call(client, "set_screen_record_fps", fps=61))["isError"]
+            assert (await call(client, "set_screen_record_fps", fps=True))["isError"]
+            assert not (await call(client, "set_screen_record_fps", fps=45))["isError"]
+            assert (await call(client, "get_library_info"))["structuredContent"]["screen_record_fps"] == 45
+            for options in [{"io_timeout": 0}, {"probe_failures": True}, {"unknown": 1}]:
+                assert (await call(client, "connect_device", serial="phone", options=options))["isError"]
+            assert instances == []
+            result = await call(client, "connect_device", serial="phone",
+                                options={"connect_timeout": 42, "probe_interval": None})
+            assert result["structuredContent"]["options"]["connect_timeout"] == 42
+            assert instances[0].options.probe_interval is None
+            result = await call(client, "get_screen_size", serial="phone")
+            assert result["structuredContent"]["screen_size"] == {"width": 100, "height": 200}
+            assert (await call(client, "connect_device", serial="phone", options={"io_timeout": 9}))["isError"]
+            await call(client, "disconnect_device", serial="phone")
+            assert (await call(client, "get_screen_size", serial="phone"))["structuredContent"]["screen_size"] is None
+            assert not (await call(client, "connect_device", serial="phone", options={"io_timeout": 9}))["isError"]
+            assert len(instances) == 1 and instances[0].options.io_timeout == 9
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("tool", ["wait_disconnected", "wait_media_error"])
+def test_wait_does_not_block_disconnect_and_timeout_keeps_session(fake_adb, monkeypatch, tool):
+    _, instances, Device = fake_adb
+
+    async def run():
+        entered = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def wait(self):
+            entered.set()
+            await finished.wait()
+            return "主动断开" if tool == "wait_disconnected" else None
+
+        async def disconnect(self):
+            self.is_connected = False
+            finished.set()
+
+        monkeypatch.setattr(Device, tool, wait, raising=False)
+        monkeypatch.setattr(Device, "disconnect", disconnect)
+        async with client_for(create_app()) as client:
+            await call(client, "connect_device", serial="phone")
+            result = await call(client, tool, serial="phone", timeout=0.01)
+            assert result["structuredContent"]["status"] == "timeout"
+            assert instances[0].is_connected
+            entered.clear()
+            task = asyncio.create_task(call(client, tool, serial="phone", timeout=None))
+            await asyncio.wait_for(entered.wait(), 2)
+            await asyncio.wait_for(call(client, "disconnect_device", serial="phone"), 2)
+            result = await asyncio.wait_for(task, 2)
+            assert result["structuredContent"]["status"] == (
+                "disconnected" if tool == "wait_disconnected" else "stopped"
+            )
+            if tool == "wait_disconnected":
+                assert result["structuredContent"]["reason"] == "主动断开"
+
+    asyncio.run(run())
+
+
+def test_media_wait_reports_failure_and_shutdown_cancels_observers(fake_adb, monkeypatch):
+    _, _, Device = fake_adb
+
+    async def failure(self):
+        raise RuntimeError("synthetic media failure")
+
+    async def run():
+        monkeypatch.setattr(Device, "wait_media_error", failure, raising=False)
+        app = create_app()
+        async with client_for(app) as client:
+            await call(client, "connect_device", serial="phone")
+            result = await call(client, "wait_media_error", serial="phone")
+            assert result["isError"]
+            assert "synthetic media failure" in result["content"][0]["text"]
+            entered = asyncio.Event()
+
+            async def wait(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+            monkeypatch.setattr(Device, "wait_disconnected", wait, raising=False)
+            task = asyncio.create_task(call(client, "wait_disconnected", serial="phone", timeout=None))
+            await asyncio.wait_for(entered.wait(), 2)
+            await asyncio.wait_for(app.state.runtime.close(), 2)
+            await asyncio.gather(task, return_exceptions=True)
+            assert not app.state.runtime._operations
+
+    asyncio.run(run())
+
+
+def test_unchecked_gestures_and_adb_apps_available_without_media(fake_adb):
+    events, instances, _ = fake_adb
+
+    async def run():
+        async with client_for(create_app()) as client:
+            assert not (await call(client, "launch_app", serial="phone",
+                                   package_name="com.example", activity_name=".Main"))["isError"]
+            assert not (await call(client, "stop_app", serial="phone", package_name="com.example"))["isError"]
+            assert "connect" not in events
+            await call(client, "connect_device", serial="phone")
+            result = await call(client, "action_series", serial="phone", check=False,
+                                actions=[{"x": 10, "y": 20, "action": "DOWN"}])
+            assert not result["isError"]
+            assert instances[-1].calls[-1][2] is False
+            result = await call(client, "action_series", serial="phone", actions=[])
+            assert not result["isError"]
 
     asyncio.run(run())

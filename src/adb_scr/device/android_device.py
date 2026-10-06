@@ -1,15 +1,17 @@
 import asyncio
 import math
+import os
 import random
 from asyncio import Lock
 from asyncio.subprocess import Process
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, final, overload
 
 from .. import consts
 from ..adb_cmd.base import adb_android_api_level, adb_connect, adb_device_cmd, adb_disconnect
 from ..adb_cmd.device_control import (
     launch_app,
+    pull_file,
     push_file,
     start_scrcpy_server,
     stop_app,
@@ -338,6 +340,69 @@ class AndroidDevice:
         """
         async with self._mutex:
             return await stop_app(self.serial, package_name)
+
+    async def push_file(
+        self, source: str | os.PathLike[str] | bytes, remote_path: str,
+        *, timeout: float = 60.0,
+    ) -> bool:
+        """通过 ADB 将本地文件或原始 bytes 复制到手机。
+
+        Args:
+            source: 本地文件路径（支持 pathlib.Path），或原始 bytes，含空 bytes。
+            remote_path: Android 绝对路径；bytes 模式应提供完整目标文件名。
+            timeout: 单次 ADB 命令超时秒数，有限正数，默认 60。
+
+        Returns:
+            复制成功返回 True；文件/ADB 错误或超时返回 False。
+
+        Raises:
+            TypeError: 参数类型不符合约定。
+            ValueError: 路径为空/包含 NUL、远端路径非绝对路径或超时无效。
+            asyncio.CancelledError: 取消时先回收 ADB 子进程和临时文件。
+
+        Notes:
+            需先 init_lib() 且设备已可通过 ADB 访问；无需 scrcpy 视频会话，
+            不自动建立 TCP transport。沿用 adb push 的覆盖和权限语义，
+            失败/取消不回滚手机端可能已经写入的内容。
+            bytes 经独立临时文件传输；本地读写/清理不阻塞事件循环。
+        """
+        async with self._mutex:
+            return await push_file(self.serial, source, remote_path, timeout=timeout)
+
+    @overload
+    async def pull_file(
+        self, remote_path: str, local_path: None = None, *, timeout: float = 60.0,
+    ) -> bytes | None: ...
+
+    @overload
+    async def pull_file(
+        self, remote_path: str, local_path: str | os.PathLike[str],
+        *, timeout: float = 60.0,
+    ) -> bool: ...
+
+    async def pull_file(
+        self, remote_path: str, local_path: str | os.PathLike[str] | None = None,
+        *, timeout: float = 60.0,
+    ) -> bool | bytes | None:
+        """通过 ADB 将手机文件复制到本地路径，或返回原始 bytes。
+
+        Args:
+            remote_path: 手机文件的 Android 绝对路径。
+            local_path: 本地目标路径（支持 pathlib.Path）；None 读取为 bytes。
+            timeout: 单次 ADB 命令超时秒数，有限正数，默认 60。
+
+        Returns:
+            指定 local_path 时返回成功与否；否则返回 bytes，失败为 None。
+            空文件返回 b""，不能用真假判断是否成功。
+
+        Notes:
+            ADB 可访问即可，无需 scrcpy 会话。异常/取消约定同 push_file。
+            路径模式沿用 adb pull 的目录、覆盖和部分写入行为，不提供回滚。
+            bytes 模式将完整文件读入内存；大文件应指定本地路径。
+            超时覆盖 ADB 命令，不包括本地读写及资源清理。
+        """
+        async with self._mutex:
+            return await pull_file(self.serial, remote_path, local_path, timeout=timeout)
 
     def get_screen_size(self) -> tuple[int, int] | None:
         """读取当前屏幕尺寸。

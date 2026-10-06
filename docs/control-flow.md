@@ -53,6 +53,11 @@ flowchart LR
 
 [`AndroidDevice.connect()`](../src/adb_scr/device/android_device.py) 先等待 `adb push` 完成，将 scrcpy 服务端载荷写到手机 `/data/local/tmp/scrcpy-server.jar`。项目资源名为 `.bin`，手机端使用 `.jar` 路径，运行的是 scrcpy 的 Java/DEX 服务端入口。
 
+公开文件传输复用此推送函数，并补充 `adb pull`；文件/bytes 传输本身不启动
+scrcpy 或媒体流。bytes 经临时文件调用 push/pull，取消时先回收子进程再清理
+临时文件。它不改变此处“推送完成后再启动服务端”的顺序，详见
+[文件传输所有权](architecture.md#文件传输与临时文件所有权)。
+
 [`start_scrcpy_server()`](../src/adb_scr/adb_cmd/device_control.py) 再通过 ADB shell 设置 `CLASSPATH`，用 `app_process / com.genymobile.scrcpy.Server` 启动进程。参数包括版本 `3.2`、每会话的 `scid`、`tunnel_forward=true`、`video=true`、`video_codec=h264`、`control=true`，以及按 Android API 级别选择的音频参数。连接先通过 `getprop ro.build.version.sdk` 查询系统版本：API >= 33 使用 `audio=true audio_codec=aac audio_source=playback audio_dup=true`，30–32 使用 AAC/output 且不保留手机播放，低于 30 使用 `audio=false`。版本读取失败会触发连接回滚。
 
 在 forward 模式下，手机上的 scrcpy 创建并监听名为 `scrcpy_SCID` 的 abstract Unix domain socket，等待主机方向发起连接。scrcpy 3.2 的 [DesktopConnection.open()](https://github.com/Genymobile/scrcpy/blob/v3.2/server/src/main/java/com/genymobile/scrcpy/device/DesktopConnection.java) 按视频、音频、控制的启用顺序执行 `accept()`；本库按同样的顺序接入启用的流；音频关闭时才只接视频和控制。

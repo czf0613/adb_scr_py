@@ -166,6 +166,53 @@ API 查询失败使连接失败，不猜测版本。音频从连接时开始采�
 
 无连接、坐标不合法或手势检查失败时，控制方法记录日志并返回。`None` 不表示手机已经处理了动作；`drain()` 只处理本地发送背压。断连后无法保证最后的抬起消息到达，调用方不应依赖断连后的后续动作。方法内的锁保护指定操作序列；整个 `double_click()` 等组合调用并非全部持有同一把锁。
 
+### 文件传输
+
+```python
+async def push_file(
+    source: str | os.PathLike[str] | bytes,
+    remote_path: str,
+    *, timeout: float = 60.0,
+) -> bool: ...
+
+async def pull_file(
+    remote_path: str,
+    local_path: str | os.PathLike[str] | None = None,
+    *, timeout: float = 60.0,
+) -> bool | bytes | None: ...
+```
+
+两者都是 `AndroidDevice` 方法，复用有超时和取消清理的 `adb -s SERIAL push/pull`。
+先调用 `init_lib()` 并确保设备已经能被 ADB 访问；无需调用 `connect()` 启动
+scrcpy 视频/音频会话，也不自动建立网络 transport。TCP 设备须已通过 ADB 连接。
+
+| 调用方式 | 成功结果 | 文件/ADB 错误或超时 |
+| --- | --- | --- |
+| `push_file(本地路径, 手机路径)` | `True` | `False` |
+| `push_file(bytes, 手机路径)` | `True` | `False` |
+| `pull_file(手机路径, 本地路径)` | `True` | `False` |
+| `pull_file(手机路径)` | 原始 `bytes`，空文件为 `b""` | `None` |
+
+本地路径接受字符串或 `pathlib.Path`；手机路径必须为无 NUL 的 Android 绝对路径。
+bytes 上传应指定完整目标文件名。bytes 不进行文本编码/解码，经独立临时文件
+调用同样的 push/pull，成功、失败、超时及取消均清理临时文件。下载为 bytes 时
+应使用 `data is not None` 判断成功；大文件宜下载到本地路径，避免完整内容驻留内存。
+
+`timeout` 为有限正数，单位秒，默认 60；只覆盖 ADB 命令，等待设备锁、本地
+文件读写和清理可额外耗时。参数类型/值错误抛 `TypeError` / `ValueError`；
+取消在子进程回收和在途本地文件工作完成后传播 `CancelledError`。
+路径模式沿用 ADB 的权限、目标目录、覆盖和部分写入行为；失败/取消不回滚
+已写入的手机文件或调用方指定的本地文件。
+
+```python
+await device.push_file("photo.jpg", "/sdcard/Download/photo.jpg")
+await device.push_file(b"\x00\xff\r\n", "/sdcard/Download/data.bin")
+await device.pull_file("/sdcard/Download/photo.jpg", "downloaded.jpg")
+data = await device.pull_file("/sdcard/Download/data.bin")
+if data is None:
+    raise RuntimeError("下载失败")
+```
+
 ### 手势类型
 
 ```python

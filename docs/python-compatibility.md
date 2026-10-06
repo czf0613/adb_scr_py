@@ -14,6 +14,34 @@ CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14
 macOS 15、26 构建并在各自系统上安装验证，均覆盖上述六种 Python ABI。
 发布流程见 [发布文档](releasing.md)。
 
+## 2026-10-06 文件传输与 MCP 公共 API 覆盖
+
+在 macOS arm64 上，普通 Python **3.14.7** 原地构建扩展；Python **3.10.20**
+在独立临时源树构建 sdist/wheel，安装 wheel 后从 site-packages 验证，正常
+工作区 `.venv` 和 `.python-version` 保持 3.14。两者均通过以下 **86 项无设备测试**：
+
+```bash
+uv run --python 3.14 --locked --extra mcp setup.py build_ext --inplace
+uv run --python 3.14 --locked --extra mcp pytest tests/test_file_transfer.py tests/test_mcp_server.py tests/test_mcp_shutdown.py tests/test_device_session.py tests/test_lifecycle.py -q -ra -o log_cli=false
+```
+
+覆盖路径/bytes 双向传输、二进制/空文件、含空格和 shell 字符的文件名、
+ADB 失败/超时/取消回收、在途本地写入与临时文件清理、MCP Base64 校验和
+空内容返回、完整公共设备方法映射、连接配置/帧率，以及等待工具与断开/关闭并发。
+ADB 均由测试替身或合成子进程代替，没有运行真实手机命令。
+
+3.10 编译 52 个源码/存根/测试/CI 脚本（包含只编译、不执行的 `test_run.py`），
+导入 25 个已安装模块和真实原生扩展。sdist/wheel 实际归档包含所需 scrcpy
+资源、原生源码/扩展、类型文件和更新后的 MCP 指南，排除 docs/tests/AGENTS.md。
+新增文件传输测试已加入 macOS 和 Windows 的 CI 显式列表；本轮没有执行 Windows
+或 3.14t 验证，也没有修改原生媒体/并发实现。
+
+同日升版 0.4.1 提交前，在普通 3.14.7 重建扩展后运行完整无设备回归：
+`pytest --ignore=tests/test_run.py -q -ra -o log_cli=false` 为 **307 passed,
+43 skipped**（42 个 Windows 用例、1 个 free-threaded 专属用例）。真机测试
+仅 `--collect-only`，成功收集 1 项；没有执行 ADB 真机操作。项目声明、lockfile
+和本地已安装包版本均验证为 0.4.1。
+
 ## 2026-09-16 Windows 云端 CI 修复验证
 
 首次 Windows CI 暴露三个问题：ARM64 3.14t 的裸版本请求选中了 x64

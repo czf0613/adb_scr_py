@@ -42,11 +42,12 @@ async def main():
         record("deinit-end")
 
     class Device:
-        def __init__(self, serial, connection_type):
+        def __init__(self, serial, connection_type, *, options=None):
             self.serial = serial
             self.connection_type = connection_type
             self.is_connected = False
             self.last_disconnect_reason = None
+            self.options = options or adb_scr.ConnectionOptions()
 
         def get_screen_size(self):
             return (100, 200) if self.is_connected else None

@@ -1,5 +1,10 @@
 import asyncio
+import math
+import os
+import tempfile
 from asyncio import subprocess
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 from aiofiles.ospath import isfile
 
@@ -11,21 +16,90 @@ from .base import adb_device_cmd
 __all__ = []
 
 
-async def push_file(serial: str, local_path: str, remote_path: str) -> bool:
-    """推送文件到ADB设备。
+def _check_transfer(remote_path: str, timeout: float) -> None:
+    if not isinstance(remote_path, str):
+        raise TypeError("remote_path 必须是字符串")
+    if not remote_path.startswith("/") or "\0" in remote_path:
+        raise ValueError("remote_path 必须是无 NUL 的 Android 绝对路径")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout 必须是秒数")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout 必须是有限正数")
 
-    Args:
-        local_path: 本地文件路径。
-        remote_path: 设备目标路径。
 
-    Returns:
-        是否成功。
-    """
-    if not await isfile(local_path):
-        logger.error(f"本地文件不存在：{local_path}")
+def _local_path(path: str | os.PathLike[str]) -> str:
+    value = os.fspath(path)
+    if not isinstance(value, str):
+        raise TypeError("本地路径必须是 str 或 PathLike[str]")
+    if not value or "\0" in value:
+        raise ValueError("本地路径不能为空或包含 NUL")
+    # Absolute paths cannot be mistaken for adb options; no shell is involved.
+    return os.path.abspath(value)
+
+
+@asynccontextmanager
+async def _transfer_file():
+    directory = None
+
+    async def create():
+        nonlocal directory
+        directory = await asyncio.to_thread(
+            tempfile.TemporaryDirectory, prefix="adb-scr-transfer-"
+        )
+
+    try:
+        # Keep ownership even if cancellation arrives while mkdtemp is running.
+        await complete_on_cancel(create())
+        yield Path(directory.name) / "payload"
+    finally:
+        if directory is not None:
+            await complete_on_cancel(asyncio.to_thread(directory.cleanup))
+
+
+async def push_file(
+    serial: str, local_path: str | os.PathLike[str] | bytes, remote_path: str,
+    *, timeout: float = 60.0,
+) -> bool:
+    """通过 adb push 复制文件或 bytes；bytes 的临时文件在取消回收后删除。"""
+    _check_transfer(remote_path, timeout)
+    source = local_path if isinstance(local_path, bytes) else _local_path(local_path)
+    try:
+        if isinstance(source, bytes):
+            async with _transfer_file() as path:
+                await complete_on_cancel(asyncio.to_thread(path.write_bytes, source))
+                return await adb_device_cmd(
+                    serial, "push", str(path), remote_path, timeout=timeout
+                )
+        if not await isfile(source):
+            logger.error(f"本地文件不存在：{source}")
+            return False
+        return await adb_device_cmd(serial, "push", source, remote_path, timeout=timeout)
+    except OSError as error:
+        logger.warning(f"文件推送失败：{error!r}")
         return False
 
-    return await adb_device_cmd(serial, "push", local_path, remote_path)
+
+async def pull_file(
+    serial: str, remote_path: str, local_path: str | os.PathLike[str] | None = None,
+    *, timeout: float = 60.0,
+) -> bool | bytes | None:
+    """通过 adb pull 写入本地路径，或从独立临时文件读取原始 bytes。"""
+    _check_transfer(remote_path, timeout)
+    target = None if local_path is None else _local_path(local_path)
+    try:
+        if target is not None:
+            return await adb_device_cmd(
+                serial, "pull", remote_path, target, timeout=timeout
+            )
+        async with _transfer_file() as path:
+            if not await adb_device_cmd(
+                serial, "pull", remote_path, str(path), timeout=timeout
+            ):
+                return None
+            return await complete_on_cancel(asyncio.to_thread(path.read_bytes))
+    except OSError as error:
+        logger.warning(f"文件拉取失败：{error!r}")
+        return None if target is None else False
 
 
 async def launch_app(serial: str, package_name: str, activity_name: str) -> bool:

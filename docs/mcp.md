@@ -120,26 +120,70 @@ asyncio.run(main())
 
 ## 工具
 
-除 `get_agent_guide` 和 `list_devices` 外，各工具都需要 `serial`。
+除 `get_agent_guide`、`get_library_info`、`list_devices` 和
+`set_screen_record_fps` 外，各工具都需要 `serial`。
 
 | 工具 | 其他参数 | 结果/约定 |
 | --- | --- | --- |
 | `get_agent_guide` | 无 | 读取 agent 操作指南，不需要 serial 或手机连接 |
+| `get_library_info` | 无 | 初始化所得 ADB/scrcpy 版本及后续连接的帧率配置 |
+| `set_screen_record_fps` | `fps`，10–60 的整数 | 进程级设置，仅影响后续新连接 |
 | `list_devices` | 无 | `devices` 包含 ADB 枚举及已管理会话；枚举结果可能包含未授权或离线设备 |
-| `connect_device` | `connection_type="usb"` | 连接状态、原图尺寸；等待元数据，不保证首帧已解码 |
+| `connect_device` | `connection_type="usb"`、`options=null` | 连接状态、原图尺寸和连接选项；等待元数据，不保证首帧已解码 |
 | `disconnect_device` | 无 | 关闭会话、完成录制；重复调用安全 |
-| `get_device_info` | 无 | 当前连接状态、原图尺寸、最近断连原因 |
+| `get_device_info` | 无 | 当前连接状态、原图尺寸、最近断连原因、连接选项 |
+| `get_screen_size` | 无 | `screen_size={width,height}`，已管理设备断开时为 null |
+| `wait_disconnected` | `timeout=30`，秒；null 无限等待 | 本次会话清理结束返回 `status=disconnected` 和 `reason`；超时返回 `status=timeout` |
+| `wait_media_error` | `timeout=30`，秒；null 无限等待 | 媒体错误返回工具错误；正常结束 `status=stopped`；超时 `status=timeout` |
 | `screenshot` | `quality=75`、`scale=1.0`、`roi=null` | MCP `image` 内容，MIME 为 `image/jpeg` |
+| `push_file` | `remote_path`，`local_path` / `data_base64` 二选一，`timeout=60` | 电脑文件或 bytes 复制到手机，成功 `status=copied` |
+| `pull_file` | `remote_path`，`local_path=null`，`timeout=60` | 写入电脑文件；省略本地路径则返回 `data_base64` 和字节数 `size` |
 | `click` / `double_click` | `x`、`y` | 单击/双击 |
 | `long_press` | `x`、`y`、`duration_ms` | 长按后抬起，0–10000 毫秒 |
 | `swipe` | `x1`、`y1`、`x2`、`y2` | 从起点滑到终点 |
-| `action_series` | `actions` | 按顺序发送单指/多指节点 |
+| `action_series` | `actions`、`check=true` | 按顺序发送单指/多指节点；false 允许跨调用的部分手势 |
 | `press_back` | 无 | Android 返回键 |
 | `paste` | `text` | 粘贴到已聚焦输入框，最多 100000 字符 |
 | `launch_app` | `package_name`、`activity_name` | 例如 `com.example.app`、`.MainActivity` |
 | `stop_app` | `package_name` | 强制停止应用 |
 | `start_recording` | `output_file`，`quality=0.75`（0.0–1.0） | 写入**服务端电脑**上的新 MP4 文件，不覆盖已有文件，不创建父目录 |
 | `stop_recording` | 无 | 等待 MP4 完成；断连后仍可查询最近录制的写入错误 |
+
+全部 19 个公共 `AndroidDevice` 方法已有工具映射：`connect`/`disconnect` 对应
+`connect_device`/`disconnect_device`，`get_screenshot_jpg` 对应 `screenshot`，
+其余同名。连接属性由 `get_device_info` 返回，`GestureActionNode` 对应 actions
+中的节点对象。模块级 `init_lib`/`deinit_lib` 由服务 lifespan 执行，防止单个
+请求关闭其他设备仍在使用的共享 daemon；初始化返回值由 `get_library_info` 提供。
+底层控制句柄、原生媒体函数不是 MCP 设备接口。
+
+`connect_device.options` 支持 `connect_timeout=30`、`io_timeout=5`、
+`close_timeout=5`、`probe_interval=5`（null 禁用探测）、`probe_failures=3`。
+提供对象时未给出的字段采用上述默认值；省略整个 options 时保留已管理设备的配置。
+修改选项须先断开再重连。等待工具不持有设备访问锁，不妨碍控制/断开/重连；
+绑定开始等待时的会话，超时/取消只结束等待。
+
+### 文件传输
+
+`push_file`、`pull_file` 及 `launch_app`、`stop_app` 仅要求已有可用的 ADB
+transport，无需先调用 `connect_device`，不会自动启动视频/音频或建立 TCP 连接。
+手机路径必须是绝对路径；本地路径位于 **MCP 服务端电脑**，不是远端客户端。
+bytes 使用标准 Base64，与 UTF-8 文本无关；空字符串编码空 bytes，是合法数据。
+上传必须恰好提供一个来源，Base64 非法时在执行 ADB 前返回工具错误。
+
+```json
+{"serial":"YOUR_DEVICE_SERIAL","remote_path":"/sdcard/Download/photo.jpg","local_path":"/path/to/photo.jpg"}
+```
+
+以上用于 `push_file`；改用 bytes 时将 `local_path` 替换成
+`"data_base64":"AP8NCg=="`（原始四字节 `00 ff 0d 0a`）。`pull_file` 省略
+`local_path` 后返回 Base64 和 `size`，空文件为 `data_base64=""`、`size=0`；
+指定路径时只返回复制状态和路径，不在响应中附带文件内容。
+
+传输超时以秒计，默认 60，只覆盖 ADB 命令，本地 I/O/清理可额外耗时。
+沿用 ADB 权限和覆盖行为，失败/取消可能留下目标部分内容；bytes 中间文件会清理。
+传输失败返回 MCP 工具错误。大文件应使用路径模式，避免 Base64 响应和整文件内存占用。
+
+### 图片与录制
 
 录屏 `quality` 接受 `0.0–1.0` 的有限数，默认 `0.75`，与截图的 `1–100` 不同。
 默认值用于兼顾画质和体积；降低数值通常减小文件，提高数值通常改善画质并增大
@@ -156,7 +200,8 @@ H.264 无损。实际效果随画面和硬件变化，AAC 音频保持直通。M
 坐标为 `(100 + 20 / 0.5, 200 + 30 / 0.5)`，即 `(140, 260)`。
 暂无解码帧时截图返回工具错误，可稍后重试；不会阻塞等待无限长时间。
 
-`actions` 接受 2–1000 个节点，例如：
+`actions` 最多接受 1000 个节点；空列表不执行操作，`check=true` 时非空列表
+至少需要 2 个节点。例如：
 
 ```json
 [
@@ -168,7 +213,10 @@ H.264 无损。实际效果随画面和硬件变化，AAC 音频保持直通。M
 
 省略 `duration_ms` 时为 50，省略 `pointer_id` 时为 0；最多同时按下 10 根手指，
 每根都必须先 DOWN，再 MOVE/UP，最终全部抬起。节点时长为 0–10000 毫秒，
-沿用库的随机等待语义。服务在发送前完整校验列表，非法参数作为 MCP 工具错误返回。
+沿用库的随机等待语义。默认 `check=true` 在发送前完整校验列表，非法参数
+作为 MCP 工具错误返回。`check=false` 跳过节点数量、时长、手指状态和配对校验，
+允许单个 DOWN 等部分手势；仍校验节点类型、坐标和 pointer_id，仍限制最多
+1000 节点。调用方负责后续 UP，取消或断连不能保证抬起消息到达。
 普通控制结果 `status="submitted"` 表示调用已提交，并非手机 UI 执行确认。
 
 ## 优雅退出
@@ -197,8 +245,8 @@ MP4 收尾必须完成才能释放资源，实际退出可能超过该时长。S
 ## 进程与访问边界
 
 服务供同一电脑上的可信 MCP 客户端使用：仅监听 loopback，SDK 校验 Host/Origin，
-未提供远程认证。客户端共享设备注册表和会话；同一设备的工具操作串行执行，
-不同设备可以并行。HTTP 无状态不代表手机会话无状态。
+未提供远程认证。客户端共享设备注册表和会话；同一设备的修改操作串行执行，
+断连/媒体错误等待释放访问锁；不同设备可以并行。HTTP 无状态不代表手机会话无状态。
 
 使用一个进程、一份 app lifespan；不使用多个 worker 或 reload。基础库的 ADB
 daemon 和配置是共享状态，服务会拒绝接管同进程中已经初始化的库。

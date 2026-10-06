@@ -13,6 +13,7 @@ CI_TESTS = [
     "tests/test_action_series.py",
     "tests/test_audio_stream.py",
     "tests/test_device_session.py",
+    "tests/test_file_transfer.py",
     "tests/test_lifecycle.py",
     "tests/test_recording.py",
     "tests/test_jpg.py",
