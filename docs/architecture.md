@@ -240,9 +240,9 @@ deinit 会影响其他 ADB 使用者。完整启动方式、工具和边界见 [
 
 ## 构建与验证
 
-推送到 `master` 后由 GitHub Actions 在 macOS 15/26 arm64 上分别构建和测试 Python 3.10–3.14、3.14t。CI 从已安装 wheel 验证导入、归档与 ABI，运行不依赖 Android 设备或真实 VideoToolbox 硬件的指定测试；硬件媒体链路仍在真实 Mac 上验证。流程与覆盖边界见 [CI 文档](ci.md)。
+推送到 `master` 后由 GitHub Actions 在 macOS 15 arm64 上构建和测试 Python 3.10–3.14、3.14t（6 项），并验证 Windows x64 的 3.10–3.14、3.14t（6 项）和 Windows ARM64 的 3.11–3.14、3.14t（5 项）。不单独运行 macOS 26 或 Windows ARM64 3.10。CI 从已安装 wheel 验证导入、归档与 ABI，运行不依赖 Android 设备或真实 VideoToolbox 硬件的指定测试；硬件媒体链路仍在真实 Mac 上验证。流程与覆盖边界见 [CI 文档](ci.md)。
 
-发布流程在 macOS 15、26 上各构建六种 ABI 的 arm64 wheel，分别使用对应的最低系统版本标签，并在各自系统上安装验证。GitHub Release 发布时通过 PyPI Trusted Publishing 上传验证后的十二个 wheel 和一个 sdist。手动触发仅构建验证，详见 [发布文档](releasing.md)。
+发布流程与上述 CI 使用相同的 17 个平台/ABI 组合，macOS 统一使用 `macosx_15_0_arm64` 标签，并在各自 runner 上安装验证。GitHub Release 发布时通过 PyPI Trusted Publishing 上传验证后的 17 个 wheel 和一个 sdist。手动触发仅构建验证，详见 [发布文档](releasing.md)。
 
 原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI；普通 3.14 的 `cp314` 与 free-threaded 3.14 的 `cp314t` ABI 需要分别构建，不能混用。本地默认环境仍为普通 3.14；3.10 和 3.14t 在独立临时环境验证，命令见 [Python 兼容性](python-compatibility.md)。本次不新增子解释器支持。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
 

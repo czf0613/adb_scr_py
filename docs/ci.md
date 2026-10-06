@@ -8,21 +8,18 @@ Actions 页面使用 **Run workflow** 手动触发。其他分支的 push 不触
 | macOS runner | 架构 | Python |
 | --- | --- | --- |
 | `macos-15` | arm64 | 3.10、3.11、3.12、3.13、3.14、3.14t |
-| `macos-26` | arm64 | 3.10、3.11、3.12、3.13、3.14、3.14t |
 
-共 12 个独立任务，一个失败不会取消同次运行的其他版本。连续推送同一分支时，
+macOS 共 6 个独立任务，一个失败不会取消同次运行的其他版本。连续推送同一分支时，
 取消旧的 workflow。每个任务最多 20 分钟，产物与 JUnit 报告保留 7 天。
 
-编译目标与发布流程一致：macOS 15/26 分别设置 deployment target 15.0/26.0，
-使用 `ARCHFLAGS=-arch arm64`，wheel 显式标记对应的 arm64 平台，并通过
+编译目标与发布流程一致：设置 deployment target 15.0，使用
+`ARCHFLAGS=-arch arm64`，wheel 显式标记 `macosx_15_0_arm64`，并通过
 `lipo` 核对实际扩展。不能继承 runner 的 Python 默认配置；其中 Python 3.11
 可能默认使用 macOS 10.9/universal2，导致 CoreVideo/Metal 声明在编译时不可见。
 
-截至 2026-09-11，选择 GitHub 提供的最近两个稳定 macOS 镜像；显式版本避免
-`macos-latest` 迁移期间覆盖范围漂移。macOS 14 已进入退役流程，将于
-2026-11-02 停用，因此不加入新矩阵。未来新增稳定镜像时更新此表与 workflow。
-标签及支持状态以 [runner 镜像列表](https://github.com/actions/runner-images) 和
-[macOS 14 退役公告](https://github.com/actions/runner-images/issues/13518) 为准。
+按 2026-10-06 的平台策略只在 macOS 15 上构建与验证，不再单独运行 macOS 26。
+当前没有使用 macOS 26 专属 API；macOS 15 wheel 的平台标签面向 15 及更新系统，
+这不等于每个更新系统都经过独立 CI 测试。固定 runner 避免 `macos-latest` 自动迁移。
 
 ## 每个任务执行的检查
 
@@ -66,7 +63,9 @@ artifact 保存，不发布到 PyPI 或 GitHub Release。独立的 wheel 发布 
 ### Windows 矩阵
 
 独立的 [windows.yml](../.github/workflows/windows.yml) 覆盖 Windows x64
-3.10/3.14/3.14t，以及原生 ARM64 3.14/3.14t。`actions/setup-python`
+3.10–3.14、3.14t（6 项），以及原生 ARM64 3.11–3.14、3.14t（5 项）。
+Windows ARM64 3.10 不在本次矩阵中；Windows 共 11 项，两平台 CI 合计 17 项。
+`actions/setup-python`
 显式选择 `x64` 或 `arm64` 和普通/无 GIL ABI，再将输出的可执行文件绝对
 路径交给 `uv sync --python`；不能仅用 `3.14t` 让 uv 在 ARM64 上自行选择，
 它可能找到可仿真运行的 x64 解释器。环境创建后仍检查实际架构及 GIL 状态。
@@ -85,7 +84,7 @@ x64 普通 Python 安装 MCP extra；ARM64 和 3.14t 只检查核心库，避免
 ```bash
 export CI_PYTHON_VERSION=3.10
 export UV_PYTHON="$CI_PYTHON_VERSION"
-# 本机选择与 runner 相同的目标；macOS 26 检查改为 26.0/macOS 26 平台。
+# 本机选择与唯一 macOS runner 相同的构建目标。
 export MACOSX_DEPLOYMENT_TARGET=15.0
 export WHEEL_PLATFORM=macosx-15.0-arm64
 export ARCHFLAGS="-arch arm64"

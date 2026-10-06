@@ -4,7 +4,6 @@ import importlib.util
 import io
 import tarfile
 import zipfile
-from itertools import product
 from pathlib import Path
 
 import pytest
@@ -23,10 +22,9 @@ def artifacts(tmp_path):
     root = tmp_path / "artifacts"
     abis = [("310", "310"), ("311", "311"), ("312", "312"),
             ("313", "313"), ("314", "314"), ("314", "314t")]
-    tags = [f"cp{python}-cp{abi}-macosx_{macos}_0_arm64"
-            for macos, (python, abi) in product((15, 26), abis)]
+    tags = [f"cp{python}-cp{abi}-macosx_15_0_arm64" for python, abi in abis]
     tags.extend(f"cp{python}-cp{abi}-win_amd64" for python, abi in abis)
-    tags.extend(["cp314-cp314-win_arm64", "cp314-cp314t-win_arm64"])
+    tags.extend(f"cp{python}-cp{abi}-win_arm64" for python, abi in abis if python != "310")
     for tag in tags:
         directory = root / f"wheel-{tag}"
         directory.mkdir(parents=True)
@@ -42,19 +40,20 @@ def artifacts(tmp_path):
     return root
 
 
-def test_complete_bundle_contains_twenty_wheels_and_one_sdist(artifacts, tmp_path):
+def test_complete_bundle_contains_seventeen_wheels_and_one_sdist(artifacts, tmp_path):
     output = tmp_path / "dist"
     load_prepare_release()(artifacts, output, "0.3.0", "v0.3.0")
-    assert len(list(output.glob("*.whl"))) == 20
+    assert len(list(output.glob("*.whl"))) == 17
     assert len(list(output.glob("*.tar.gz"))) == 1
     for path in output.iterdir():
         assert path.read_bytes() == next(artifacts.rglob(path.name)).read_bytes()
 
 
-@pytest.mark.parametrize("macos", [15, 26])
-def test_missing_macos_target_is_rejected(artifacts, tmp_path, macos):
-    for wheel in artifacts.rglob(f"*macosx_{macos}_0_arm64.whl"):
-        wheel.unlink()
+@pytest.mark.parametrize("tag", [
+    "cp310-cp310", "cp311-cp311", "cp312-cp312", "cp313-cp313", "cp314-cp314", "cp314-cp314t",
+])
+def test_missing_macos_abi_is_rejected(artifacts, tmp_path, tag):
+    next(artifacts.rglob(f"*-{tag}-macosx_15_0_arm64.whl")).unlink()
     output = tmp_path / "dist"
     with pytest.raises(ValueError, match="wheel set"):
         load_prepare_release()(artifacts, output, "0.3.0")
@@ -65,10 +64,21 @@ def test_missing_macos_target_is_rejected(artifacts, tmp_path, macos):
     "cp310-cp310-win_amd64", "cp311-cp311-win_amd64",
     "cp312-cp312-win_amd64", "cp313-cp313-win_amd64",
     "cp314-cp314-win_amd64", "cp314-cp314t-win_amd64",
+    "cp311-cp311-win_arm64", "cp312-cp312-win_arm64", "cp313-cp313-win_arm64",
     "cp314-cp314-win_arm64", "cp314-cp314t-win_arm64",
 ])
 def test_missing_windows_abi_is_rejected(artifacts, tmp_path, tag):
     next(artifacts.rglob(f"*-{tag}.whl")).unlink()
+    output = tmp_path / "dist"
+    with pytest.raises(ValueError, match="wheel set"):
+        load_prepare_release()(artifacts, output, "0.3.0")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("tag", ["cp314-cp314-macosx_26_0_arm64", "cp310-cp310-win_arm64"])
+def test_excluded_platforms_are_rejected(artifacts, tmp_path, tag):
+    source = next(artifacts.rglob("*.whl"))
+    (artifacts / f"adb_scr_py-0.3.0-{tag}.whl").write_bytes(source.read_bytes())
     output = tmp_path / "dist"
     with pytest.raises(ValueError, match="wheel set"):
         load_prepare_release()(artifacts, output, "0.3.0")

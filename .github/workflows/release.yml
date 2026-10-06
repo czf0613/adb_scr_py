@@ -29,9 +29,6 @@ jobs:
           - os: macos-15
             deployment_target: "15.0"
             wheel_platform: macosx-15.0-arm64
-          - os: macos-26
-            deployment_target: "26.0"
-            wheel_platform: macosx-26.0-arm64
         python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
     env:
       CI_PYTHON_VERSION: ${{ matrix.python }}
@@ -117,6 +114,10 @@ jobs:
           - {os: windows-2025, python: "3.13", arch: x64, mcp: true}
           - {os: windows-2025, python: "3.14", arch: x64, mcp: true}
           - {os: windows-2025, python: "3.14t", arch: x64, mcp: false}
+          # Keep the release targets identical to windows.yml.
+          - {os: windows-11-arm, python: "3.11", arch: arm64, mcp: false}
+          - {os: windows-11-arm, python: "3.12", arch: arm64, mcp: false}
+          - {os: windows-11-arm, python: "3.13", arch: arm64, mcp: false}
           - {os: windows-11-arm, python: "3.14", arch: arm64, mcp: false}
           - {os: windows-11-arm, python: "3.14t", arch: arm64, mcp: false}
     defaults:

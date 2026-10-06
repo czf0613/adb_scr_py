@@ -6,12 +6,13 @@
 
 Python 源码、测试、构建脚本和 `.pyi` 均须兼容 3.10。新增依赖或使用较新语法/标准库 API 时，要在真实 3.10 解释器下验证；仅在 3.14 上通过测试不能证明最低版本可用。
 
-推送到 `master` 后的自动构建矩阵为 macOS 15/26 arm64 × Python 3.10–3.14、3.14t。
+推送到 `master` 后的自动构建矩阵为 macOS 15 arm64 × Python 3.10–3.14、3.14t。
 CI 检查已安装 wheel、归档内容、源码语法、无设备测试和 3.14t 的实际 GIL 状态。
 云端测试选择及真实媒体硬件验证的边界见 [CI 文档](ci.md)。另有 Windows x64/ARM64 的独立构建工作流，见 [Windows 文档](windows.md)。
 
-预编译发布 wheel 分为 `macosx_15_0_arm64`、`macosx_26_0_arm64` 两组，分别在
-macOS 15、26 构建并在各自系统上安装验证，均覆盖上述六种 Python ABI。
+macOS 发布 6 个 `macosx_15_0_arm64` wheel，只在 macOS 15 构建和安装验证。
+Windows CI 与发布均覆盖 x64 的 3.10–3.14、3.14t，以及 ARM64 的 3.11–3.14、
+3.14t，忽略 Windows ARM64 3.10；三类平台共 17 个 wheel。
 发布流程见 [发布文档](releasing.md)。
 
 ## 2026-10-06 文件传输与 MCP 公共 API 覆盖

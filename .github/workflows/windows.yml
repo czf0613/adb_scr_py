@@ -21,8 +21,15 @@ jobs:
       matrix:
         include:
           - {os: windows-2025, python: "3.10", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.11", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.12", arch: x64, mcp: true}
+          - {os: windows-2025, python: "3.13", arch: x64, mcp: true}
           - {os: windows-2025, python: "3.14", arch: x64, mcp: true}
           - {os: windows-2025, python: "3.14t", arch: x64, mcp: false}
+          # Native Windows ARM64 starts at Python 3.11 in this matrix.
+          - {os: windows-11-arm, python: "3.11", arch: arm64, mcp: false}
+          - {os: windows-11-arm, python: "3.12", arch: arm64, mcp: false}
+          - {os: windows-11-arm, python: "3.13", arch: arm64, mcp: false}
           - {os: windows-11-arm, python: "3.14", arch: arm64, mcp: false}
           - {os: windows-11-arm, python: "3.14t", arch: arm64, mcp: false}
     defaults:

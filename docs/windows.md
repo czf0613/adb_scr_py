@@ -42,13 +42,14 @@ Windows 3.14t 和 ARM64 CI 使用 `--core-only`，不安装可选 MCP extra：
 pywin32 312 没有 cp314t wheel；锁定的 cryptography 在 ARM64 上会转入源码
 编译并要求额外 OpenSSL 工具链。x64 普通 Python 继续安装并检查 MCP 模块。
 这些是可选依赖的覆盖边界，核心媒体库的测试保持开启。
-`.github/workflows/windows.yml` 覆盖 x64 的 3.10/3.14/3.14t 和 ARM64 的
-3.14/3.14t。通过 `actions/setup-python` 显式选择架构和 ABI，并将解释器
+`.github/workflows/windows.yml` 覆盖 x64 的 3.10–3.14、3.14t 和 ARM64 的
+3.11–3.14、3.14t，共 11 项；ARM64 3.10 不在矩阵中。通过 `actions/setup-python`
+显式选择架构和 ABI，并将解释器
 绝对路径传给 `uv sync --python`，避免 ARM64 上的版本选择回落到 x64 仿真。
 随后核对实际 `sysconfig.get_platform()`，使用原生 `windows-11-arm` 验证。
 
 正式发布由 [release.yml](../.github/workflows/release.yml) 构建 Windows x64
-的 Python 3.10–3.14、3.14t，以及 ARM64 的 3.14、3.14t wheel。每个 wheel
+的 Python 3.10–3.14、3.14t，以及 ARM64 的 3.11–3.14、3.14t wheel。每个 wheel
 从 sdist 构建、安装并完成无设备验证后，与 macOS 产物一起通过完整性校验，
 再统一上传 PyPI；任一平台失败都会阻止发布，详见 [发布流程](releasing.md)。
 

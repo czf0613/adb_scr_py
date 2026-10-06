@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-15]
         python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
     defaults:
       run:
@@ -28,8 +28,8 @@ jobs:
     env:
       CI_PYTHON_VERSION: ${{ matrix.python }}
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.os == 'macos-15' && '15.0' || '26.0' }}
-      WHEEL_PLATFORM: ${{ matrix.os == 'macos-15' && 'macosx-15.0-arm64' || 'macosx-26.0-arm64' }}
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      WHEEL_PLATFORM: macosx-15.0-arm64
       ARCHFLAGS: "-arch arm64"
 
     steps:
