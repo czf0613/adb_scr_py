@@ -15,6 +15,10 @@ native_code/*/.cache/
 .venv
 .python-version
 
+# Local editor settings
+/.vscode/*
+!/.vscode/settings.json
+
 # Claude Code
 .claude/
 

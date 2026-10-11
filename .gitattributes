@@ -5,6 +5,10 @@
 **/*.lock linguist-vendored
 **/*.md linguist-vendored
 
-# 不是自己写的库
+# 仅用于 IDE 索引，不计入语言统计
 native_code/**/CMakeLists.txt linguist-vendored
-native_code/macOS/third_party/** linguist-vendored
+
+# .h 扩展名由多种语言共用，按对应的原生实现显式指定语言
+native_code/macOS/include/frame_jpg_encoder.h linguist-language=Objective-C
+native_code/macOS/include/recording.h linguist-language=Objective-C
+native_code/Windows/include/media.h linguist-language=C++

@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/Users/czf/Desktop/utils/adb_scr_py/native_code/macOS"
+    "cmake.sourceDirectory": "${workspaceFolder}/native_code",
+    "cmake.buildDirectory": "${workspaceFolder}/native_code/build"
 }

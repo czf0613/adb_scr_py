@@ -6,6 +6,11 @@ Media Foundation、D3D11、WIC，不依赖 FFmpeg、显卡厂商 SDK 或 OpenMP�
 本机测试是 Windows x64；原生 ARM64 CI 已通过构建及无设备媒体验证，
 ARM64 手机连接和 Windows 10 仍需实机验证。
 
+IDE 索引使用 CMake 3.18+，统一入口 `native_code/CMakeLists.txt` 在 Windows
+下选择 `native_code/Windows/CMakeLists.txt`；共享 VS Code 配置通过工作区路径
+定位入口。索引包含 C++17、Windows 宏定义和自动查找的 Python 头文件，不用于
+构建或发布 `.pyd`。
+
 ## 构建与无设备测试
 
 安装 Visual Studio C++ 桌面工具及 Windows SDK，使用与 Python 匹配的

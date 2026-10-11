@@ -172,7 +172,10 @@ data = await device.pull_file("/sdcard/Download/hello.txt")  # bytes；失败为
 
 ## 许可证与依赖
 
-MIT License。屏幕传输使用 [scrcpy](https://github.com/Genymobile/scrcpy)；媒体处理使用 Apple VideoToolbox、AVFoundation/CoreMedia、AudioToolbox、Accelerate/vImage、ImageIO/CoreGraphics 和 Core Image/Metal。
+本项目使用 MIT License。屏幕传输使用 [scrcpy](https://github.com/Genymobile/scrcpy)；媒体处理使用各平台的系统组件：
+
+- **macOS**：Apple VideoToolbox、AVFoundation/CoreMedia、AudioToolbox、Accelerate/vImage、ImageIO/CoreGraphics 和 Core Image/Metal。
+- **Windows**：Microsoft Media Foundation（H.264 编解码、AAC 直通和 MP4 封装）、D3D11/DXGI，以及 Windows Imaging Component（WIC，用于图像处理和 JPEG 编码）。构建与系统组件要求见 [Windows 文档](docs/windows.md)。
 
 ## Windows 媒体错误
 

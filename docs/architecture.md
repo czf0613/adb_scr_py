@@ -246,6 +246,14 @@ deinit 会影响其他 ADB 使用者。完整启动方式、工具和边界见 [
 
 原生扩展由 `setup.py` 构建；`CMakeLists.txt` 仅供 IDE 索引。wheel 使用具体 CPython 小版本 ABI；普通 3.14 的 `cp314` 与 free-threaded 3.14 的 `cp314t` ABI 需要分别构建，不能混用。本地默认环境仍为普通 3.14；3.10 和 3.14t 在独立临时环境验证，命令见 [Python 兼容性](python-compatibility.md)。本次不新增子解释器支持。`MANIFEST.in` 排除 `docs/`、`tests/`、`AGENTS.md`；sdist 保留原生源码/头文件和 scrcpy 资源，wheel 保留扩展、资源、`.pyi`、`py.typed`。
 
+共享的 `.vscode/settings.json` 使用 `${workspaceFolder}/native_code` 作为索引入口，
+缓存放在忽略的 `native_code/build/`。CMake 3.18+ 按当前平台加载 macOS 或 Windows
+的源文件清单：macOS 启用 C/Objective-C，Windows 启用 C++17 并沿用扩展的宏定义。
+两者通过 `find_package(Python3 3.10 COMPONENTS Interpreter Development.Module)`
+查找匹配的 Python 头文件；需要指定解释器时，在个人 CMake 配置中设置
+`Python3_EXECUTABLE`，不提交本机路径。索引目标不加入默认构建，正式构建仍只走
+`setup.py`。其他 `.vscode` 文件默认忽略，共享配置按需显式纳入版本控制。
+
 无设备测试覆盖 EOF/半包/握手超时、部分连接失败、取消、进程退出、显式重连、探测阈值、手势中断、管道排空、原生重复关闭、GCD 排队工作完成及合成 H.264 → BGRA8 → JPEG。free-threaded 验证检查导入和测试结束时 GIL 仍关闭，并覆盖编码线程状态、多线程共享不可变输入、同一句柄读写/关闭、独立解码器及 GC 下的 Capsule 析构。真机 `tests/test_run.py` 仅在明确请求时执行，默认兼容性核查只编译或收集它。
 
 
